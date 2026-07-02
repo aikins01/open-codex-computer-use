@@ -1,5 +1,11 @@
 # 功能发布记录
 
+## 2026-07
+
+| 日期 | 功能域 | 用户价值 | 变更摘要 |
+| --- | --- | --- | --- |
+| 2026-07-02 | macOS 截图上下文控制 | MCP host 可以按自己的上下文预算调小 `get_app_state` 和 action tool 返回的截图，降低复杂窗口反复返回大 PNG 对 agent 上下文的压力。 | macOS 截图捕获新增 `OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT`、`OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION`、`OPEN_COMPUTER_USE_IMAGE_MAX_BYTES`、`OPEN_COMPUTER_USE_IMAGE_MIN_SCALE` 配置；默认行为保持不变，并确保较小的 `OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION` 仍作为返回 PNG 的长边上限生效。 |
+
 ## 2026-06
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
