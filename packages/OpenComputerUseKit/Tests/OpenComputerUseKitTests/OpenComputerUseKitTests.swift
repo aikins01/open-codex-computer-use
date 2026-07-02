@@ -382,34 +382,34 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertFalse(AppDiscovery.compareListedApps(frequent, frontmost))
     }
 
-    func testPreferredPermissionAppBundleURLPrefersInstalledCopyOverTransientRunningCopy() {
-        let installed = URL(fileURLWithPath: "/opt/homebrew/lib/node_modules/open-computer-use/dist/Open Computer Use.app")
-        let running = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/Open Computer Use.app")
-        let fallback = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use-debug/dist/Open Computer Use.app")
+    func testBestResolutionIndexPrefersRegularAppNameMatchOverAccessoryExecutableMatch() {
+        let candidates = [
+            AppDiscovery.ResolutionCandidate(name: "Bitwarden", executableName: "safari", isRegularApp: false),
+            AppDiscovery.ResolutionCandidate(name: "Safari", executableName: "Safari", isRegularApp: true),
+        ]
 
-        let resolved = PermissionSupport.preferredPermissionAppBundleURL(
-            preferredInstalledBundleURL: installed,
-            runningBundleURL: running,
-            fallbackDevelopmentBundleURL: fallback
-        )
-
-        XCTAssertEqual(resolved, installed)
+        XCTAssertEqual(AppDiscovery.bestResolutionIndex(of: candidates, matching: "Safari"), 1)
     }
 
-    func testPreferredPermissionAppBundleURLPrefersRunningDevelopmentCopy() {
-        let installed = URL(fileURLWithPath: "/Applications/Open Computer Use.app")
-        let running = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/Open Computer Use (Dev).app")
-        let fallback = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use-debug/dist/Open Computer Use (Dev).app")
+    func testBestResolutionIndexPrefersNameMatchOverExecutableMatchAmongRegularApps() {
+        let candidates = [
+            AppDiscovery.ResolutionCandidate(name: "Other", executableName: "Notes", isRegularApp: true),
+            AppDiscovery.ResolutionCandidate(name: "Notes", executableName: "Notes", isRegularApp: true),
+        ]
 
-        let resolved = PermissionSupport.preferredPermissionAppBundleURL(
-            preferredInstalledBundleURL: installed,
-            runningBundleURL: running,
-            fallbackDevelopmentBundleURL: fallback,
-            preferRunningBundle: true
-        )
-
-        XCTAssertEqual(resolved, running)
+        XCTAssertEqual(AppDiscovery.bestResolutionIndex(of: candidates, matching: "Notes"), 1)
     }
+
+    func testBestResolutionIndexFallsBackToAccessoryMatchesWhenNoRegularAppMatches() {
+        let candidates = [
+            AppDiscovery.ResolutionCandidate(name: "Helper", executableName: "helper", isRegularApp: false),
+            AppDiscovery.ResolutionCandidate(name: "Safari", executableName: "Safari", isRegularApp: true),
+        ]
+
+        XCTAssertEqual(AppDiscovery.bestResolutionIndex(of: candidates, matching: "helper"), 0)
+        XCTAssertNil(AppDiscovery.bestResolutionIndex(of: candidates, matching: "missing"))
+    }
+
 
     func testPreferredPermissionAppBundleURLCanPreferRunningReleaseCopyOverStaleInstalledCopy() {
         let staleInstalled = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/npm/open-computer-use/dist/Open Computer Use.app")
