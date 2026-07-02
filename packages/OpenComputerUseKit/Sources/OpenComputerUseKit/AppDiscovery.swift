@@ -166,6 +166,12 @@ enum AppDiscovery {
         throw ComputerUseError.appNotFound(normalizedQuery)
     }
 
+    struct ResolutionCandidate {
+        let name: String
+        let executableName: String?
+        let isRegularApp: Bool
+    }
+
     private static func resolvedRunningApp(in descriptors: [RunningAppDescriptor], matching query: String) -> RunningAppDescriptor? {
         if isBundleIdentifierQuery(query) {
             return descriptors.first(where: { descriptor in
@@ -173,14 +179,43 @@ enum AppDiscovery {
             })
         }
 
-        return descriptors.first(where: { descriptor in
-            guard !AppSafetyPolicy.isBlocked(bundleIdentifier: descriptor.bundleIdentifier) else {
-                return false
-            }
+        let allowed = descriptors.filter { descriptor in
+            !AppSafetyPolicy.isBlocked(bundleIdentifier: descriptor.bundleIdentifier)
+        }
+        let candidates = allowed.map { descriptor in
+            ResolutionCandidate(
+                name: descriptor.name,
+                executableName: descriptor.runningApplication.executableURL?.deletingPathExtension().lastPathComponent,
+                isRegularApp: descriptor.runningApplication.activationPolicy == .regular
+            )
+        }
 
-            return descriptor.name.caseInsensitiveCompare(query) == .orderedSame
-                || descriptor.runningApplication.executableURL?.deletingPathExtension().lastPathComponent.caseInsensitiveCompare(query) == .orderedSame
-        })
+        guard let index = bestResolutionIndex(of: candidates, matching: query) else {
+            return nil
+        }
+
+        return allowed[index]
+    }
+
+    static func bestResolutionIndex(of candidates: [ResolutionCandidate], matching query: String) -> Int? {
+        func firstIndex(matchingName: Bool, requiringRegularApp: Bool) -> Int? {
+            candidates.firstIndex(where: { candidate in
+                guard candidate.isRegularApp || !requiringRegularApp else {
+                    return false
+                }
+
+                if matchingName {
+                    return candidate.name.caseInsensitiveCompare(query) == .orderedSame
+                }
+
+                return candidate.executableName?.caseInsensitiveCompare(query) == .orderedSame
+            })
+        }
+
+        return firstIndex(matchingName: true, requiringRegularApp: true)
+            ?? firstIndex(matchingName: false, requiringRegularApp: true)
+            ?? firstIndex(matchingName: true, requiringRegularApp: false)
+            ?? firstIndex(matchingName: false, requiringRegularApp: false)
     }
 
     private static func userFacingRunningApps() -> [RunningAppDescriptor] {
