@@ -198,24 +198,37 @@ enum AppDiscovery {
     }
 
     static func bestResolutionIndex(of candidates: [ResolutionCandidate], matching query: String) -> Int? {
-        func firstIndex(matchingName: Bool, requiringRegularApp: Bool) -> Int? {
-            candidates.firstIndex(where: { candidate in
-                guard candidate.isRegularApp || !requiringRegularApp else {
-                    return false
-                }
+        var best: (rank: Int, index: Int)?
 
-                if matchingName {
-                    return candidate.name.caseInsensitiveCompare(query) == .orderedSame
-                }
+        for (index, candidate) in candidates.enumerated() {
+            let rank: Int?
+            if candidate.isRegularApp, candidate.name.caseInsensitiveCompare(query) == .orderedSame {
+                rank = 0
+            } else if candidate.isRegularApp, candidate.executableName?.caseInsensitiveCompare(query) == .orderedSame {
+                rank = 1
+            } else if candidate.name.caseInsensitiveCompare(query) == .orderedSame {
+                rank = 2
+            } else if candidate.executableName?.caseInsensitiveCompare(query) == .orderedSame {
+                rank = 3
+            } else {
+                rank = nil
+            }
 
-                return candidate.executableName?.caseInsensitiveCompare(query) == .orderedSame
-            })
+            guard let rank else {
+                continue
+            }
+
+            if let current = best, rank >= current.rank {
+                continue
+            }
+
+            best = (rank, index)
+            if rank == 0 {
+                break
+            }
         }
 
-        return firstIndex(matchingName: true, requiringRegularApp: true)
-            ?? firstIndex(matchingName: false, requiringRegularApp: true)
-            ?? firstIndex(matchingName: true, requiringRegularApp: false)
-            ?? firstIndex(matchingName: false, requiringRegularApp: false)
+        return best?.index
     }
 
     private static func userFacingRunningApps() -> [RunningAppDescriptor] {

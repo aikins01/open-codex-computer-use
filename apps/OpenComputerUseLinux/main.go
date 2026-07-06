@@ -25,7 +25,9 @@ var version = "0.1.54"
 //go:embed runtime.py
 var linuxRuntimeScript string
 
-const serverInstructions = "Computer Use tools let you interact with Linux desktop apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Linux actions use AT-SPI2 semantic actions and editable text APIs first. Coordinate mouse and key synthesis are best-effort fallbacks and are not a universal Wayland background input model."
+const serverInstructions = "Computer Use tools let you interact with Linux desktop apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, select_text, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Linux actions use AT-SPI2 semantic actions and editable text APIs first. Coordinate mouse and key synthesis are best-effort fallbacks and are not a universal Wayland background input model."
+
+const appStateNoChangeMessage = "There has been no change"
 
 type toolDefinition struct {
 	Name        string         `json:"name"`
@@ -48,6 +50,27 @@ type toolCallResult struct {
 
 func textResult(text string, isError bool) toolCallResult {
 	return toolCallResult{Content: []contentItem{{Type: "text", Text: text}}, IsError: isError}
+}
+
+type appStateOutputOptions struct {
+	IncludeImage bool
+	ForceImage   bool
+	MaxTextChars *int
+	OnlyChanges  bool
+}
+
+type appStateOutputCache struct {
+	RenderedText        string
+	ScreenshotPNGBase64 string
+	ImageIncluded       bool
+}
+
+func (c appStateOutputCache) sameSnapshot(other appStateOutputCache) bool {
+	return c.RenderedText == other.RenderedText && c.ScreenshotPNGBase64 == other.ScreenshotPNGBase64
+}
+
+func defaultAppStateOutputOptions() appStateOutputOptions {
+	return appStateOutputOptions{IncludeImage: true}
 }
 
 type appDescriptor struct {
@@ -119,17 +142,49 @@ func (s *appSnapshot) renderedText() string {
 }
 
 func (s *appSnapshot) result() toolCallResult {
-	result := toolCallResult{
-		Content: []contentItem{{Type: "text", Text: s.renderedText()}},
+	result, _ := s.appStateResult(defaultAppStateOutputOptions(), nil)
+	return result
+}
+
+func (s *appSnapshot) appStateResult(options appStateOutputOptions, previous *appStateOutputCache) (toolCallResult, appStateOutputCache) {
+	renderedText := s.renderedText()
+	screenshot := ""
+	if s != nil {
+		screenshot = s.ScreenshotPNGBase64
 	}
-	if s != nil && s.ScreenshotPNGBase64 != "" {
+	current := appStateOutputCache{RenderedText: renderedText, ScreenshotPNGBase64: screenshot}
+	if options.OnlyChanges && previous != nil && previous.sameSnapshot(current) {
+		return textResult(appStateNoChangeMessage, false), current
+	}
+
+	result := toolCallResult{
+		Content: []contentItem{{Type: "text", Text: limitedAppStateText(renderedText, options.MaxTextChars)}},
+	}
+	if options.IncludeImage && screenshot != "" && (options.ForceImage || previous == nil || !previous.ImageIncluded || previous.ScreenshotPNGBase64 != screenshot) {
 		result.Content = append(result.Content, contentItem{
 			Type:     "image",
-			Data:     s.ScreenshotPNGBase64,
+			Data:     screenshot,
 			MimeType: "image/png",
 		})
+		current.ImageIncluded = true
 	}
-	return result
+	return result, current
+}
+
+func limitedAppStateText(text string, maxChars *int) string {
+	if maxChars == nil || *maxChars == 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= *maxChars {
+		return text
+	}
+	suffix := fmt.Sprintf("\n\n[truncated after %d characters]", *maxChars)
+	suffixRunes := []rune(suffix)
+	if *maxChars <= len(suffixRunes) {
+		return string(runes[:*maxChars])
+	}
+	return string(runes[:*maxChars-len(suffixRunes)]) + suffix
 }
 
 type linuxRequest struct {
@@ -148,6 +203,9 @@ type linuxRequest struct {
 	Direction    string         `json:"direction,omitempty"`
 	Pages        float64        `json:"pages,omitempty"`
 	Text         string         `json:"text,omitempty"`
+	Prefix       string         `json:"prefix,omitempty"`
+	Suffix       string         `json:"suffix,omitempty"`
+	Selection    string         `json:"selection,omitempty"`
 	Key          string         `json:"key,omitempty"`
 	Value        string         `json:"value,omitempty"`
 	WindowBounds *frame         `json:"windowBounds,omitempty"`
@@ -162,11 +220,12 @@ type linuxResponse struct {
 }
 
 type service struct {
-	snapshots map[string]*appSnapshot
+	snapshots       map[string]*appSnapshot
+	appStateOutputs map[string]appStateOutputCache
 }
 
 func newService() *service {
-	return &service{snapshots: map[string]*appSnapshot{}}
+	return &service{snapshots: map[string]*appSnapshot{}, appStateOutputs: map[string]appStateOutputCache{}}
 }
 
 func (s *service) callTool(name string, args map[string]any) toolCallResult {
@@ -174,7 +233,11 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 	case "list_apps":
 		return s.listApps()
 	case "get_app_state":
-		return s.getAppState(requiredString(args, "app"), optionalBool(args, "show_full_text"))
+		options, errText := appStateOutputOptionsFromArgs(args)
+		if errText != "" {
+			return textResult(errText, true)
+		}
+		return s.getAppState(requiredString(args, "app"), optionalBool(args, "show_full_text"), options)
 	case "click":
 		return s.click(
 			requiredString(args, "app"),
@@ -196,6 +259,15 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 			requiredString(args, "direction"),
 			requiredElementIndex(args),
 			floatValue(optionalFloat(args, "pages"), 1),
+		)
+	case "select_text":
+		return s.selectText(
+			requiredString(args, "app"),
+			requiredElementIndex(args),
+			requiredString(args, "text"),
+			optionalString(args, "prefix"),
+			optionalString(args, "suffix"),
+			defaultString(optionalString(args, "selection"), "text"),
 		)
 	case "drag":
 		return s.drag(
@@ -230,7 +302,7 @@ func (s *service) listApps() toolCallResult {
 	return textResult(response.Text, false)
 }
 
-func (s *service) getAppState(app string, showFullText bool) toolCallResult {
+func (s *service) getAppState(app string, showFullText bool, outputOptions appStateOutputOptions) toolCallResult {
 	if app == "" {
 		return textResult("Missing required argument: app", true)
 	}
@@ -238,7 +310,13 @@ func (s *service) getAppState(app string, showFullText bool) toolCallResult {
 	if result.IsError {
 		return result
 	}
-	return snapshot.result()
+	keys := appStateCacheKeys(app, snapshot)
+	previous := s.previousAppStateOutput(keys)
+	result, current := snapshot.appStateResult(outputOptions, previous)
+	for _, key := range keys {
+		s.appStateOutputs[key] = current
+	}
+	return result
 }
 
 func (s *service) click(app, elementIndex string, x, y *float64, clickCount int, mouseButton string) toolCallResult {
@@ -315,6 +393,30 @@ func (s *service) scroll(app, direction, elementIndex string, pages float64) too
 		return textResult(err.Error(), true)
 	}
 	return s.actionResult(app, linuxRequest{Tool: "scroll", App: app, Element: record, Direction: normalized, Pages: pages})
+}
+
+func (s *service) selectText(app, elementIndex, text, prefix, suffix, selection string) toolCallResult {
+	if app == "" {
+		return textResult("Missing required argument: app", true)
+	}
+	if elementIndex == "" {
+		return textResult("Missing required argument: element_index", true)
+	}
+	if text == "" {
+		return textResult("Missing required argument: text", true)
+	}
+	if selection != "text" && selection != "cursor_before" && selection != "cursor_after" {
+		return textResult("Invalid selection: "+selection, true)
+	}
+	snapshot := s.currentSnapshot(app)
+	if snapshot == nil {
+		return textResult("No app state is available for "+app+". Run get_app_state before action tools.", true)
+	}
+	record, err := lookupElement(snapshot, elementIndex)
+	if err != nil {
+		return textResult(err.Error(), true)
+	}
+	return s.actionResult(app, linuxRequest{Tool: "select_text", App: app, Element: record, Text: text, Prefix: prefix, Suffix: suffix, Selection: selection})
 }
 
 func (s *service) drag(app string, fromX, fromY, toX, toY *float64) toolCallResult {
@@ -967,6 +1069,92 @@ func optionalBool(args map[string]any, key string) bool {
 	return value
 }
 
+func appStateOutputOptionsFromArgs(args map[string]any) (appStateOutputOptions, string) {
+	options := defaultAppStateOutputOptions()
+	if value, ok := args["include_image"].(bool); ok {
+		options.IncludeImage = value
+	}
+	if value, ok := args["force_image"].(bool); ok {
+		options.ForceImage = value
+	}
+	if value, ok := args["only_changes"].(bool); ok {
+		options.OnlyChanges = value
+	}
+	maxTextChars, ok := optionalNonNegativeInt(args, "max_text_chars")
+	if !ok {
+		return options, "max_text_chars must be a non-negative integer"
+	}
+	options.MaxTextChars = maxTextChars
+	return options, ""
+}
+
+func optionalNonNegativeInt(args map[string]any, key string) (*int, bool) {
+	value, exists := args[key]
+	if !exists || value == nil {
+		return nil, true
+	}
+
+	switch value := value.(type) {
+	case json.Number:
+		integer, err := value.Int64()
+		if err != nil || integer < 0 || int64(int(integer)) != integer {
+			return nil, false
+		}
+		result := int(integer)
+		return &result, true
+	case float64:
+		return nonNegativeIntFloat(value)
+	case int:
+		if value < 0 {
+			return nil, false
+		}
+		result := value
+		return &result, true
+	case int64:
+		if value < 0 || int64(int(value)) != value {
+			return nil, false
+		}
+		result := int(value)
+		return &result, true
+	}
+
+	return nil, false
+}
+
+func nonNegativeIntFloat(value float64) (*int, bool) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || value < 0 || value > float64(int(^uint(0)>>1)) {
+		return nil, false
+	}
+	result := int(value)
+	return &result, true
+}
+
+func appStateCacheKeys(query string, snapshot *appSnapshot) []string {
+	seen := map[string]bool{}
+	keys := []string{}
+	rawKeys := []string{query}
+	if snapshot != nil {
+		rawKeys = append(rawKeys, snapshot.App.Name, snapshot.App.BundleIdentifier)
+	}
+	for _, key := range rawKeys {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if normalized != "" && !seen[normalized] {
+			seen[normalized] = true
+			keys = append(keys, normalized)
+		}
+	}
+	return keys
+}
+
+func (s *service) previousAppStateOutput(keys []string) *appStateOutputCache {
+	for _, key := range keys {
+		if previous, ok := s.appStateOutputs[key]; ok {
+			return &previous
+		}
+	}
+	return nil
+}
+
 func intValue(value *float64, fallback int) int {
 	if value == nil {
 		return fallback
@@ -1022,6 +1210,10 @@ func toolDefinitions() []toolDefinition {
 			InputSchema: objectSchema(map[string]any{
 				"app":            stringProperty("App name or bundle identifier"),
 				"show_full_text": booleanProperty("Return full accessibility text without the default 500 character truncation. Defaults to false."),
+				"include_image":  booleanProperty("Return a screenshot image block when one is available. Defaults to true."),
+				"force_image":    booleanProperty("Return the screenshot even when it matches the previous app state for this app. Defaults to false."),
+				"max_text_chars": integerProperty("Maximum characters to return from the rendered accessibility text. Set 0 for no post-render cap.", 0),
+				"only_changes":   booleanProperty("Return only a no-change message when the rendered state and screenshot match the previous get_app_state result for this app. Defaults to false."),
 			}, []string{"app"}),
 		},
 		{
@@ -1059,6 +1251,19 @@ func toolDefinitions() []toolDefinition {
 				"element_index": stringProperty("Element identifier"),
 				"pages":         numberProperty("Number of pages to scroll. Fractional values are supported. Defaults to 1"),
 			}, []string{"app", "element_index", "direction"}),
+		},
+		{
+			Name:        "select_text",
+			Description: "Select text inside a text element, or place the text cursor before or after it. Provide text exactly as it appears in the accessibility tree, including any Markdown formatting. If the text is not unique, provide surrounding prefix or suffix text to disambiguate it.",
+			Annotations: defaultAnnotations(),
+			InputSchema: objectSchema(map[string]any{
+				"app":           stringProperty("App name or bundle identifier"),
+				"element_index": stringProperty("Text element identifier"),
+				"text":          stringProperty("Target text as shown in the accessibility tree"),
+				"prefix":        stringProperty("Optional text immediately before the target, used to disambiguate repeated matches"),
+				"suffix":        stringProperty("Optional text immediately after the target, used to disambiguate repeated matches"),
+				"selection":     enumStringProperty("Whether to select the text or place the cursor before or after it. Defaults to text.", []string{"text", "cursor_before", "cursor_after"}),
+			}, []string{"app", "element_index", "text"}),
 		},
 		{
 			Name:        "set_value",
@@ -1120,8 +1325,12 @@ func numberProperty(description string) map[string]any {
 	return map[string]any{"type": "number", "description": description}
 }
 
-func integerProperty(description string) map[string]any {
-	return map[string]any{"type": "integer", "description": description}
+func integerProperty(description string, minimum ...int) map[string]any {
+	property := map[string]any{"type": "integer", "description": description}
+	if len(minimum) > 0 {
+		property["minimum"] = minimum[0]
+	}
+	return property
 }
 
 func main() {

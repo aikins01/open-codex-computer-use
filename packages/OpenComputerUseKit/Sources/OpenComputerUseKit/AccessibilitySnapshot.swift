@@ -61,17 +61,47 @@ struct ImageCaptureConfig: Sendable, Equatable {
     static let current = ImageCaptureConfig.fromEnvironment()
 
     static func fromEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> ImageCaptureConfig {
-        ImageCaptureConfig(
-            captureTimeout: parseImageConfigPositiveDouble(environment["OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT"])
-                ?? defaults.captureTimeout,
-            maxPNGBytes: parseImageConfigPositiveInt(environment["OPEN_COMPUTER_USE_IMAGE_MAX_BYTES"])
-                ?? defaults.maxPNGBytes,
-            maxDimension: parseImageConfigPositiveInt(environment["OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION"])
-                ?? defaults.maxDimension,
-            minScale: parseImageConfigUnitInterval(environment["OPEN_COMPUTER_USE_IMAGE_MIN_SCALE"])
-                .map { CGFloat($0) } ?? defaults.minScale
+        let minScale = imageConfigValue(
+            name: "OPEN_COMPUTER_USE_IMAGE_MIN_SCALE",
+            raw: environment["OPEN_COMPUTER_USE_IMAGE_MIN_SCALE"],
+            defaultValue: Double(defaults.minScale),
+            parse: parseImageConfigUnitInterval
+        )
+
+        return ImageCaptureConfig(
+            captureTimeout: imageConfigValue(
+                name: "OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT",
+                raw: environment["OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT"],
+                defaultValue: defaults.captureTimeout,
+                parse: parseImageConfigPositiveDouble
+            ),
+            maxPNGBytes: imageConfigValue(
+                name: "OPEN_COMPUTER_USE_IMAGE_MAX_BYTES",
+                raw: environment["OPEN_COMPUTER_USE_IMAGE_MAX_BYTES"],
+                defaultValue: defaults.maxPNGBytes,
+                parse: parseImageConfigPositiveInt
+            ),
+            maxDimension: imageConfigValue(
+                name: "OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION",
+                raw: environment["OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION"],
+                defaultValue: defaults.maxDimension,
+                parse: parseImageConfigPositiveInt
+            ),
+            minScale: CGFloat(minScale)
         )
     }
+}
+
+private func imageConfigValue<T>(name: String, raw: String?, defaultValue: T, parse: (String?) -> T?) -> T {
+    if let value = parse(raw) {
+        return value
+    }
+
+    if raw?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+        fputs("[open-computer-use] Ignoring invalid \(name); using default.\n", stderr)
+    }
+
+    return defaultValue
 }
 
 private func parseImageConfigPositiveInt(_ raw: String?) -> Int? {
@@ -407,7 +437,7 @@ enum SnapshotBuilder {
             treeLines: lines,
             focusedSummary: focusedSummary,
             focusedElement: nil,
-            selectedText: nil,
+            selectedText: state.selectedText,
             elements: records
         )
     }

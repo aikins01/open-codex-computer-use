@@ -35,6 +35,7 @@ get_app_state
 click
 perform_secondary_action
 scroll
+select_text
 drag
 type_text
 press_key
@@ -49,6 +50,7 @@ Use `call` for one-off checks:
 open-computer-use call list_apps
 ocu call list_apps
 open-computer-use call get_app_state --args '{"app":"TextEdit"}'
+open-computer-use call select_text --args '{"app":"TextEdit","element_index":"1","text":"Draft"}'
 open-computer-use call set_value --args '{"app":"TextEdit","element_index":"1","value":"Draft"}'
 ```
 
@@ -81,6 +83,16 @@ open-computer-use snapshot --show-full-text TextEdit
 
 The same `show_full_text` tool argument and `--show-full-text` snapshot flag apply on macOS, Linux, and Windows.
 
+For context-budgeted hosts, `get_app_state` also accepts output controls on macOS, Linux, and Windows:
+
+```sh
+open-computer-use call get_app_state --args '{"app":"TextEdit","include_image":false,"max_text_chars":20000}'
+open-computer-use call get_app_state --args '{"app":"TextEdit","only_changes":true}'
+open-computer-use call get_app_state --args '{"app":"TextEdit","include_image":true,"force_image":true}'
+```
+
+Use `include_image:false` to omit screenshot content, `force_image:true` to return a repeated screenshot, `max_text_chars:0` for no post-render cap, and `only_changes:true` to receive `There has been no change` when rendered text and screenshot match the previous `get_app_state` result for that app.
+
 Action tools return refreshed app state with the default 500 character text limit. If full text is still needed after an action, run `get_app_state` again with `show_full_text: true`.
 
 ## Choosing Targets
@@ -99,6 +111,8 @@ The macOS runtime uses Accessibility, ScreenCaptureKit, and targeted input event
 ### Windows
 
 The Windows runtime uses UI Automation and Win32 message fallbacks. It must run in a logged-in desktop session. A detached SSH or service context may start the CLI but fail to see top-level windows.
+
+Windows `select_text` uses UIA `TextPattern` only when `OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_SELECTION=1` is set, because that selection operation can bring the target app to the foreground.
 
 ### Linux
 

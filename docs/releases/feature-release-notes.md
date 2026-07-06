@@ -4,6 +4,8 @@
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-07-02 | `get_app_state` 上下文输出控制 | MCP host 可以直接让 `open-computer-use` 省略截图、去重重复截图、限制 state 文本长度，减少复杂 UI 反复进上下文的成本。 | 按 Codex bundled app 中观察到的 `screenshotNeededForContext`、`There has been no change`、`had_screenshot` / `had_ax_text` 等状态线索，为 macOS、Linux 和 Windows `get_app_state` 增加 `include_image`、`force_image`、`max_text_chars` 和 `only_changes` 参数；默认保留可用 state，并把精确去重/截断放在 runtime 层。 |
+| 2026-07-02 | 文本选区工具对齐 | Agent 可以像官方 Codex `computer-use` 一样在文本元素内选中指定文本，或把光标放到匹配文本前后，适合编辑长文本时做局部替换或插入。 | 按官方 `computer-use` `1.0.857` 新增 `select_text` 工具；macOS 使用 Accessibility selected text range，Linux 使用 AT-SPI text selection / caret API，Windows 使用显式 opt-in 的 UI Automation `TextPattern`，并补 fixture smoke、schema 测试和跨平台 runtime 定义。 |
 | 2026-07-02 | macOS 截图上下文控制 | MCP host 可以按自己的上下文预算调小 `get_app_state` 和 action tool 返回的截图，降低复杂窗口反复返回大 PNG 对 agent 上下文的压力。 | macOS 截图捕获新增 `OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT`、`OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION`、`OPEN_COMPUTER_USE_IMAGE_MAX_BYTES`、`OPEN_COMPUTER_USE_IMAGE_MIN_SCALE` 配置；默认行为保持不变，并确保较小的 `OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION` 仍作为返回 PNG 的长边上限生效。 |
 
 ## 2026-06

@@ -11,7 +11,7 @@ Open Computer Use exposes Computer Use as a local CLI and stdio MCP server. It i
 
 It supports the same core tool surface across macOS, Linux, and Windows:
 `list_apps`, `get_app_state`, `click`, `perform_secondary_action`, `scroll`,
-`drag`, `type_text`, `press_key`, and `set_value`.
+`select_text`, `drag`, `type_text`, `press_key`, and `set_value`.
 
 ## Core Workflow
 
@@ -31,7 +31,7 @@ It supports the same core tool surface across macOS, Linux, and Windows:
 - Ask before sending, deleting, purchasing, approving, uploading, or making other externally visible changes.
 - Do not assume Codex.app plugin helpers are available. Use the installed `open-computer-use` / `ocu` CLI or an explicit MCP config.
 - Always run `get_app_state` before using `element_index`; do not guess indexes across sessions or after large UI changes.
-- Prefer semantic actions and `set_value` for editable controls. Use coordinate `click`, `scroll`, and `drag` only when the element tree does not expose a safer target.
+- Prefer semantic actions, `select_text`, and `set_value` for editable controls. Use coordinate `click`, `scroll`, and `drag` only when the element tree does not expose a safer target.
 - On macOS, do not enable `OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1` unless the user explicitly wants diagnostic behavior that may move the real pointer.
 - On Windows and Linux, confirm the command is running inside the logged-in desktop session before assuming GUI automation is available.
 
@@ -45,6 +45,7 @@ open-computer-use call list_apps
 ocu call list_apps
 open-computer-use call get_app_state --args '{"app":"TextEdit"}'
 open-computer-use call get_app_state --args '{"app":"TextEdit","show_full_text":true}'
+open-computer-use call select_text --args '{"app":"TextEdit","element_index":"1","text":"Draft"}'
 open-computer-use call click --args '{"app":"TextEdit","element_index":"0"}'
 open-computer-use call type_text --args '{"app":"TextEdit","text":"Hello from Open Computer Use"}'
 ```

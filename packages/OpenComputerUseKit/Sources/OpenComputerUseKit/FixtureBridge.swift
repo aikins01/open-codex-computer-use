@@ -43,12 +43,14 @@ public struct FixtureAppState: Codable, Sendable {
     public let windowTitle: String
     public let windowBounds: FixtureRect
     public let focusedIdentifier: String?
+    public let selectedText: String?
     public let elements: [FixtureElementState]
 
-    public init(windowTitle: String, windowBounds: FixtureRect, focusedIdentifier: String?, elements: [FixtureElementState]) {
+    public init(windowTitle: String, windowBounds: FixtureRect, focusedIdentifier: String?, selectedText: String? = nil, elements: [FixtureElementState]) {
         self.windowTitle = windowTitle
         self.windowBounds = windowBounds
         self.focusedIdentifier = focusedIdentifier
+        self.selectedText = selectedText
         self.elements = elements
     }
 }
@@ -63,6 +65,9 @@ public struct FixtureCommand: Codable, Sendable {
     public let toY: Double?
     public let direction: String?
     public let pages: Double?
+    public let prefix: String?
+    public let suffix: String?
+    public let selection: String?
 
     public init(
         kind: String,
@@ -73,7 +78,10 @@ public struct FixtureCommand: Codable, Sendable {
         toX: Double? = nil,
         toY: Double? = nil,
         direction: String? = nil,
-        pages: Double? = nil
+        pages: Double? = nil,
+        prefix: String? = nil,
+        suffix: String? = nil,
+        selection: String? = nil
     ) {
         self.kind = kind
         self.identifier = identifier
@@ -84,6 +92,9 @@ public struct FixtureCommand: Codable, Sendable {
         self.toY = toY
         self.direction = direction
         self.pages = pages
+        self.prefix = prefix
+        self.suffix = suffix
+        self.selection = selection
     }
 }
 

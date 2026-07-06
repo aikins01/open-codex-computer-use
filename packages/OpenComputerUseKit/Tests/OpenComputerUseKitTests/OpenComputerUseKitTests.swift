@@ -397,7 +397,142 @@ final class OpenComputerUseKitTests: XCTestCase {
     }
 
     func testToolDefinitionCount() {
-        XCTAssertEqual(ToolDefinitions.all.count, 9)
+        XCTAssertEqual(ToolDefinitions.all.count, 10)
+    }
+
+    func testAppStateToolResultCanOmitImageAndCapText() {
+        let result = appStateToolResult(
+            renderedText: String(repeating: "x", count: 120),
+            screenshotPNGData: Data([1, 2, 3]),
+            previous: nil,
+            options: AppStateOutputOptions(includeImage: false, maxTextChars: 80)
+        )
+
+        XCTAssertEqual(result.content.count, 1)
+        let text = result.primaryText ?? ""
+        XCTAssertLessThanOrEqual(text.count, 80)
+        XCTAssertTrue(text.contains("[truncated after 80 characters]"))
+    }
+
+    func testAppStateToolResultTreatsZeroTextCapAsUnlimited() {
+        let text = String(repeating: "x", count: 120)
+        let result = appStateToolResult(
+            renderedText: text,
+            screenshotPNGData: nil,
+            previous: nil,
+            options: AppStateOutputOptions(maxTextChars: 0)
+        )
+
+        XCTAssertEqual(result.primaryText, text)
+    }
+
+    func testLimitedAppStateTextDoesNotTruncateAtExactCap() {
+        XCTAssertEqual(limitedAppStateText("abc", maxCharacters: 3), "abc")
+    }
+
+    func testAppStateToolResultDeduplicatesScreenshotUnlessForced() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "old", screenshotPNGData: image, imageIncluded: true)
+        let deduped = appStateToolResult(
+            renderedText: "new",
+            screenshotPNGData: image,
+            previous: previous,
+            options: .defaults
+        )
+        let forced = appStateToolResult(
+            renderedText: "new",
+            screenshotPNGData: image,
+            previous: previous,
+            options: AppStateOutputOptions(forceImage: true)
+        )
+
+        XCTAssertEqual(contentTypes(in: deduped), ["text"])
+        XCTAssertEqual(contentTypes(in: forced), ["text", "image"])
+    }
+
+    func testAppStateToolResultIncludesImageAfterTextOnlyResponse() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "old", screenshotPNGData: image, imageIncluded: false)
+        let result = appStateToolResult(
+            renderedText: "new",
+            screenshotPNGData: image,
+            previous: previous,
+            options: .defaults
+        )
+
+        XCTAssertEqual(contentTypes(in: result), ["text", "image"])
+    }
+
+    func testAppStateToolResultReturnsNoChangeWhenRequested() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "same", screenshotPNGData: image, imageIncluded: true)
+        let result = appStateToolResult(
+            renderedText: "same",
+            screenshotPNGData: image,
+            previous: previous,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+
+        XCTAssertEqual(result.primaryText, appStateNoChangeMessage)
+        XCTAssertEqual(contentTypes(in: result), ["text"])
+    }
+
+    func testAppStateToolResultDoesNotReturnNoChangeWhenOnlyScreenshotMatches() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "old", screenshotPNGData: image, imageIncluded: true)
+        let result = appStateToolResult(
+            renderedText: "new",
+            screenshotPNGData: image,
+            previous: previous,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+
+        XCTAssertEqual(result.primaryText, "new")
+        XCTAssertEqual(contentTypes(in: result), ["text"])
+    }
+
+    func testNonNegativeIntegerArgumentAcceptsJSONNumbers() throws {
+        let arguments = try readOpenComputerUseToolArguments(
+            json: #"{"app":"TextEdit","max_text_chars":20000}"#,
+            file: nil
+        )
+
+        XCTAssertEqual(normalizedNonNegativeIntegerArgument(arguments["max_text_chars"]), 20_000)
+        XCTAssertEqual(normalizedNonNegativeIntegerArgument(0), 0)
+        XCTAssertNil(normalizedNonNegativeIntegerArgument(-1))
+        XCTAssertNil(normalizedNonNegativeIntegerArgument(1.5))
+        XCTAssertNil(normalizedNonNegativeIntegerArgument(true))
+    }
+
+    func testTextSelectionMatchUsesPrefixAndSuffix() throws {
+        let value = "first target middle target end" as NSString
+        let range = try textSelectionMatch(
+            in: value as String,
+            text: "target",
+            prefix: "middle ",
+            suffix: " end"
+        )
+        let cursorRange = try TextSelectionMode(toolValue: "cursor_after").selectedRange(for: range)
+
+        XCTAssertEqual(range.location, value.range(of: "target", options: [], range: NSRange(location: 13, length: value.length - 13)).location)
+        XCTAssertEqual(range.length, ("target" as NSString).length)
+        XCTAssertEqual(cursorRange.location, range.location + range.length)
+        XCTAssertEqual(cursorRange.length, 0)
+    }
+
+    func testTextSelectionMatchRequiresAdjacentPrefixAndSuffix() {
+        XCTAssertThrowsError(try textSelectionMatch(in: "set-xvalue-ok-typed", text: "value-ok", prefix: "set-", suffix: "-typed")) { error in
+            XCTAssertEqual((error as? ComputerUseError)?.errorDescription, "Target text not found in element")
+        }
+        XCTAssertThrowsError(try textSelectionMatch(in: "set-value-ok-x-typed", text: "value-ok", prefix: "set-", suffix: "-typed")) { error in
+            XCTAssertEqual((error as? ComputerUseError)?.errorDescription, "Target text not found in element")
+        }
+    }
+
+    func testTextSelectionMatchRejectsAmbiguousTextWithoutContext() {
+        XCTAssertThrowsError(try textSelectionMatch(in: "target and target", text: "target", prefix: nil, suffix: nil)) { error in
+            XCTAssertEqual((error as? ComputerUseError)?.errorDescription, "Target text is ambiguous; provide prefix or suffix")
+        }
     }
 
     func testReadToolArgumentsAcceptsJSONObject() throws {
@@ -621,6 +756,14 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(AppDiscovery.bestResolutionIndex(of: candidates, matching: "Notes"), 1)
     }
 
+    func testBestResolutionIndexMatchesCaseInsensitively() {
+        let candidates = [
+            AppDiscovery.ResolutionCandidate(name: "Safari", executableName: "Safari", isRegularApp: true),
+        ]
+
+        XCTAssertEqual(AppDiscovery.bestResolutionIndex(of: candidates, matching: "sAfArI"), 0)
+    }
+
     func testBestResolutionIndexFallsBackToAccessoryMatchesWhenNoRegularAppMatches() {
         let candidates = [
             AppDiscovery.ResolutionCandidate(name: "Helper", executableName: "helper", isRegularApp: false),
@@ -631,6 +774,35 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertNil(AppDiscovery.bestResolutionIndex(of: candidates, matching: "missing"))
     }
 
+    func testPreferredPermissionAppBundleURLPrefersInstalledCopyOverTransientRunningCopy() {
+        let installed = URL(fileURLWithPath: "/opt/homebrew/lib/node_modules/open-computer-use/dist/Open Computer Use.app")
+        let running = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/Open Computer Use.app")
+        let fallback = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use-debug/dist/Open Computer Use.app")
+
+        let resolved = PermissionSupport.preferredPermissionAppBundleURL(
+            preferredInstalledBundleURL: installed,
+            runningBundleURL: running,
+            fallbackDevelopmentBundleURL: fallback,
+            preferRunningBundle: false
+        )
+
+        XCTAssertEqual(resolved, installed)
+    }
+
+    func testPreferredPermissionAppBundleURLPrefersRunningDevelopmentCopy() {
+        let installed = URL(fileURLWithPath: "/Applications/Open Computer Use.app")
+        let running = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/Open Computer Use (Dev).app")
+        let fallback = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use-debug/dist/Open Computer Use (Dev).app")
+
+        let resolved = PermissionSupport.preferredPermissionAppBundleURL(
+            preferredInstalledBundleURL: installed,
+            runningBundleURL: running,
+            fallbackDevelopmentBundleURL: fallback,
+            preferRunningBundle: false
+        )
+
+        XCTAssertEqual(resolved, running)
+    }
 
     func testPreferredPermissionAppBundleURLCanPreferRunningReleaseCopyOverStaleInstalledCopy() {
         let staleInstalled = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/npm/open-computer-use/dist/Open Computer Use.app")
@@ -791,12 +963,28 @@ final class OpenComputerUseKitTests: XCTestCase {
         let getAppStateSchema = tools["get_app_state"]?.inputSchema
         let getAppStateProperties = getAppStateSchema?["properties"] as? [String: [String: Any]]
         XCTAssertEqual(getAppStateProperties?["show_full_text"]?["type"] as? String, "boolean")
+        XCTAssertEqual(getAppStateProperties?["include_image"]?["type"] as? String, "boolean")
+        XCTAssertEqual(getAppStateProperties?["force_image"]?["type"] as? String, "boolean")
+        XCTAssertEqual(getAppStateProperties?["only_changes"]?["type"] as? String, "boolean")
+        XCTAssertEqual(getAppStateProperties?["max_text_chars"]?["type"] as? String, "integer")
+        XCTAssertEqual(getAppStateProperties?["max_text_chars"]?["minimum"] as? Int, 0)
         XCTAssertEqual(getAppStateSchema?["required"] as? [String], ["app"])
         let scrollPages = (tools["scroll"]?.inputSchema["properties"] as? [String: [String: Any]])?["pages"]
         XCTAssertEqual(scrollPages?["type"] as? String, "number")
         XCTAssertEqual(
             scrollPages?["description"] as? String,
             "Number of pages to scroll. Fractional values are supported. Defaults to 1"
+        )
+        let selectTextSchema = tools["select_text"]?.inputSchema
+        let selectTextProperties = selectTextSchema?["properties"] as? [String: [String: Any]]
+        XCTAssertEqual(
+            tools["select_text"]?.description,
+            "Select text inside a text element, or place the text cursor before or after it. Provide text exactly as it appears in the accessibility tree, including any Markdown formatting. If the text is not unique, provide surrounding prefix or suffix text to disambiguate it."
+        )
+        XCTAssertEqual(selectTextSchema?["required"] as? [String], ["app", "element_index", "text"])
+        XCTAssertEqual(
+            selectTextProperties?["selection"]?["enum"] as? [String],
+            ["text", "cursor_before", "cursor_after"]
         )
     }
 
@@ -1936,6 +2124,10 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertLessThan(negativePose.angleOffset, 0)
         XCTAssertLessThanOrEqual(abs(negativePose.angleOffset), visualCursorIdleRotationAmplitude() + 0.0001)
         XCTAssertGreaterThan(abs(negativePose.angleOffset), 0.08)
+    }
+
+    private func contentTypes(in result: ToolCallResult) -> [String] {
+        result.content.compactMap { $0.dictionary["type"] as? String }
     }
 
     private func makeSnapshot(treeLines: [String], focusedSummary: String?, selectedText: String? = nil) -> AppSnapshot {

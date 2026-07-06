@@ -170,6 +170,189 @@ func invalidSecondaryActionErrorMessage(action: String, elementIndex: Int) -> St
     "\(action) is not a valid secondary action for \(elementIndex)"
 }
 
+public struct AppStateOutputOptions: Sendable, Equatable {
+    public let includeImage: Bool
+    public let forceImage: Bool
+    public let maxTextChars: Int?
+    public let onlyChanges: Bool
+
+    public static let defaults = AppStateOutputOptions()
+
+    public init(
+        includeImage: Bool = true,
+        forceImage: Bool = false,
+        maxTextChars: Int? = nil,
+        onlyChanges: Bool = false
+    ) {
+        self.includeImage = includeImage
+        self.forceImage = forceImage
+        self.maxTextChars = maxTextChars
+        self.onlyChanges = onlyChanges
+    }
+}
+
+let appStateNoChangeMessage = "There has been no change"
+
+struct AppStateOutputCache: Equatable {
+    let renderedText: String
+    let screenshotPNGData: Data?
+    let imageIncluded: Bool
+
+    init(renderedText: String, screenshotPNGData: Data?, imageIncluded: Bool = false) {
+        self.renderedText = renderedText
+        self.screenshotPNGData = screenshotPNGData
+        self.imageIncluded = imageIncluded
+    }
+
+    func sameSnapshot(as other: AppStateOutputCache) -> Bool {
+        renderedText == other.renderedText && screenshotPNGData == other.screenshotPNGData
+    }
+}
+
+func limitedAppStateText(_ text: String, maxCharacters: Int?) -> String {
+    guard let maxCharacters, maxCharacters > 0, text.count > maxCharacters else {
+        return text
+    }
+
+    let suffix = "\n\n[truncated after \(maxCharacters) characters]"
+    guard maxCharacters > suffix.count else {
+        return String(text.prefix(maxCharacters))
+    }
+
+    return String(text.prefix(maxCharacters - suffix.count)) + suffix
+}
+
+func appStateToolResult(
+    renderedText: String,
+    screenshotPNGData: Data?,
+    previous: AppStateOutputCache?,
+    options: AppStateOutputOptions
+) -> ToolCallResult {
+    appStateToolResultWithCache(
+        renderedText: renderedText,
+        screenshotPNGData: screenshotPNGData,
+        previous: previous,
+        options: options
+    ).result
+}
+
+func appStateToolResultWithCache(
+    renderedText: String,
+    screenshotPNGData: Data?,
+    previous: AppStateOutputCache?,
+    options: AppStateOutputOptions
+) -> (result: ToolCallResult, cache: AppStateOutputCache) {
+    let current = AppStateOutputCache(renderedText: renderedText, screenshotPNGData: screenshotPNGData)
+    if options.onlyChanges, previous?.sameSnapshot(as: current) == true {
+        return (ToolCallResult.text(appStateNoChangeMessage), current)
+    }
+
+    var content = [ToolResultContentItem.text(limitedAppStateText(renderedText, maxCharacters: options.maxTextChars))]
+    var imageIncluded = false
+    if options.includeImage, let screenshotPNGData {
+        let screenshotChanged = previous?.screenshotPNGData != screenshotPNGData
+        if options.forceImage || previous == nil || previous?.imageIncluded == false || screenshotChanged {
+            content.append(.pngImage(screenshotPNGData))
+            imageIncluded = true
+        }
+    }
+
+    return (
+        ToolCallResult(content: content),
+        AppStateOutputCache(renderedText: renderedText, screenshotPNGData: screenshotPNGData, imageIncluded: imageIncluded)
+    )
+}
+
+enum TextSelectionMode: String {
+    case text
+    case cursorBefore = "cursor_before"
+    case cursorAfter = "cursor_after"
+
+    init(toolValue: String) throws {
+        let normalized = toolValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty {
+            self = .text
+            return
+        }
+
+        guard let mode = TextSelectionMode(rawValue: normalized) else {
+            throw ComputerUseError.message("Invalid selection: \(toolValue)")
+        }
+
+        self = mode
+    }
+
+    func selectedRange(for match: NSRange) -> NSRange {
+        switch self {
+        case .text:
+            return match
+        case .cursorBefore:
+            return NSRange(location: match.location, length: 0)
+        case .cursorAfter:
+            return NSRange(location: match.location + match.length, length: 0)
+        }
+    }
+}
+
+func textSelectionMatch(in value: String, text: String, prefix: String?, suffix: String?) throws -> NSRange {
+    let target = text as NSString
+    guard target.length > 0 else {
+        throw ComputerUseError.missingArgument("text")
+    }
+
+    let haystack = value as NSString
+    let prefix = prefix ?? ""
+    let suffix = suffix ?? ""
+    let prefixLength = (prefix as NSString).length
+    let suffixLength = (suffix as NSString).length
+    var matches: [NSRange] = []
+    var searchRange = NSRange(location: 0, length: haystack.length)
+
+    while searchRange.length >= target.length {
+        let found = haystack.range(of: text, options: [], range: searchRange)
+        if found.location == NSNotFound {
+            break
+        }
+
+        let afterStart = found.location + found.length
+        let prefixMatches = prefixLength == 0 || (
+            found.location >= prefixLength
+                && haystack.compare(
+                    prefix,
+                    options: [],
+                    range: NSRange(location: found.location - prefixLength, length: prefixLength)
+                ) == .orderedSame
+        )
+        let suffixMatches = suffixLength == 0 || (
+            haystack.length - afterStart >= suffixLength
+                && haystack.compare(
+                    suffix,
+                    options: [],
+                    range: NSRange(location: afterStart, length: suffixLength)
+                ) == .orderedSame
+        )
+        if prefixMatches && suffixMatches {
+            matches.append(found)
+        }
+
+        let nextLocation = found.location + max(found.length, 1)
+        if nextLocation > haystack.length {
+            break
+        }
+        searchRange = NSRange(location: nextLocation, length: haystack.length - nextLocation)
+    }
+
+    if matches.isEmpty {
+        throw ComputerUseError.message("Target text not found in element")
+    }
+
+    if matches.count > 1 {
+        throw ComputerUseError.message("Target text is ambiguous; provide prefix or suffix")
+    }
+
+    return matches[0]
+}
+
 func localClickActionPoints(frame: CGRect, isSyntheticText: Bool) -> [CGPoint] {
     let center = CGPoint(x: frame.midX, y: frame.midY)
     let leading = CGPoint(
@@ -349,6 +532,7 @@ func shouldPreferContainingWebRowAXClickCandidate(
 
 public final class ComputerUseService {
     private var snapshotsByApp: [String: AppSnapshot] = [:]
+    private var appStateOutputsByApp: [String: AppStateOutputCache] = [:]
 
     public init() {}
 
@@ -360,8 +544,17 @@ public final class ComputerUseService {
         )
     }
 
-    public func getAppState(app query: String, showFullText: Bool = false) throws -> ToolCallResult {
-        snapshotResult(for: try refreshSnapshot(for: query, showFullText: showFullText), style: .fullState)
+    public func getAppState(
+        app query: String,
+        showFullText: Bool = false,
+        outputOptions: AppStateOutputOptions = .defaults
+    ) throws -> ToolCallResult {
+        appStateResult(
+            for: try refreshSnapshot(for: query, showFullText: showFullText),
+            query: query,
+            style: .fullState,
+            options: outputOptions
+        )
     }
 
     public func click(app query: String, elementIndex: String?, x: Double?, y: Double?, clickCount: Int, mouseButton: String) throws -> ToolCallResult {
@@ -550,6 +743,42 @@ public final class ComputerUseService {
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
 
+    public func selectText(app query: String, elementIndex: String, text: String, prefix: String?, suffix: String?, selection: String) throws -> ToolCallResult {
+        let mode = try TextSelectionMode(toolValue: selection)
+        let snapshot = try currentSnapshot(for: query)
+        let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+
+        if snapshot.mode == .fixture {
+            guard let identifier = record.identifier else {
+                throw ComputerUseError.invalidArguments("fixture select_text requires an identifier-backed element")
+            }
+
+            try FixtureBridge.post(FixtureCommand(
+                kind: "select_text",
+                identifier: identifier,
+                value: text,
+                prefix: prefix,
+                suffix: suffix,
+                selection: mode.rawValue
+            ))
+            Thread.sleep(forTimeInterval: 0.15)
+            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        }
+
+        guard let element = record.element else {
+            throw ComputerUseError.stateUnavailable("element \(elementIndex) has no backing accessibility object")
+        }
+
+        guard let value = selectableTextValue(for: element) else {
+            throw ComputerUseError.message("Cannot select text for an element that does not expose text")
+        }
+
+        let match = try textSelectionMatch(in: value, text: text, prefix: prefix, suffix: suffix)
+        try setSelectedTextRange(mode.selectedRange(for: match), on: element)
+        Thread.sleep(forTimeInterval: 0.1)
+        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+    }
+
     public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double) throws -> ToolCallResult {
         let snapshot = try currentSnapshot(for: query)
         if snapshot.mode == .fixture {
@@ -694,6 +923,39 @@ public final class ComputerUseService {
 
     private func invalidSecondaryActionMessage(action: String, record: ElementRecord) -> String {
         invalidSecondaryActionErrorMessage(action: action, elementIndex: record.index)
+    }
+
+    private func appStateResult(
+        for snapshot: AppSnapshot,
+        query: String,
+        style: SnapshotTextStyle,
+        options: AppStateOutputOptions
+    ) -> ToolCallResult {
+        let renderedText = snapshot.renderedText(style: style)
+        let keys = appStateCacheKeys(query: query, snapshot: snapshot)
+        let previous = keys.lazy.compactMap { self.appStateOutputsByApp[$0] }.first
+        let output = appStateToolResultWithCache(
+            renderedText: renderedText,
+            screenshotPNGData: snapshot.screenshotPNGData,
+            previous: previous,
+            options: options
+        )
+        for key in keys {
+            appStateOutputsByApp[key] = output.cache
+        }
+        return output.result
+    }
+
+    private func appStateCacheKeys(query: String, snapshot: AppSnapshot) -> [String] {
+        var seen = Set<String>()
+        var keys: [String] = []
+        for key in [query, snapshot.app.name, snapshot.app.bundleIdentifier ?? ""] {
+            let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !normalized.isEmpty, seen.insert(normalized).inserted {
+                keys.append(normalized)
+            }
+        }
+        return keys
     }
 
     private func performPreferredClick(on record: ElementRecord, button: MouseButtonKind, clickCount: Int) throws -> Bool {
@@ -1229,6 +1491,40 @@ public final class ComputerUseService {
             return false
         default:
             throw ComputerUseError.message("AXUIElementSetAttributeValue failed with \(result.rawValue)")
+        }
+    }
+
+    private func selectableTextValue(for element: AXUIElement) -> String? {
+        for attribute in [
+            kAXValueAttribute as String,
+            kAXTitleAttribute as String,
+            kAXDescriptionAttribute as String,
+            kAXHelpAttribute as String,
+        ] {
+            guard let value = stringValue(of: element, attribute: attribute), !value.isEmpty else {
+                continue
+            }
+
+            return value
+        }
+
+        return nil
+    }
+
+    private func setSelectedTextRange(_ range: NSRange, on element: AXUIElement) throws {
+        var cfRange = CFRange(location: range.location, length: range.length)
+        guard let value = AXValueCreate(.cfRange, &cfRange) else {
+            throw ComputerUseError.message("Failed to encode selected text range")
+        }
+
+        let result = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value)
+        switch result {
+        case .success:
+            return
+        case .failure, .attributeUnsupported, .actionUnsupported, .cannotComplete, .noValue, .invalidUIElement, .illegalArgument:
+            throw ComputerUseError.message("Cannot select text for an element that does not expose a settable text selection range")
+        default:
+            throw ComputerUseError.message("AXUIElementSetAttributeValue(\(kAXSelectedTextRangeAttribute)) failed with \(result.rawValue)")
         }
     }
 

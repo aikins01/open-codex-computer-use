@@ -681,6 +681,75 @@ function Get-CurrentPatternOrNull($element, $pattern) {
     }
 }
 
+function Find-TextSelectionMatch([string]$value, [string]$target, [string]$prefix, [string]$suffix) {
+    if ([string]::IsNullOrEmpty($target)) {
+        throw "Missing required argument: text"
+    }
+
+    $foundRanges = @()
+    $start = 0
+    while ($start -le $value.Length) {
+        $index = $value.IndexOf($target, $start, [StringComparison]::Ordinal)
+        if ($index -lt 0) {
+            break
+        }
+
+        $afterStart = $index + $target.Length
+        $before = $value.Substring(0, $index)
+        $after = $value.Substring($afterStart)
+        $prefixMatches = [string]::IsNullOrEmpty($prefix) -or $before.EndsWith($prefix, [StringComparison]::Ordinal)
+        $suffixMatches = [string]::IsNullOrEmpty($suffix) -or $after.StartsWith($suffix, [StringComparison]::Ordinal)
+        if ($prefixMatches -and $suffixMatches) {
+            $foundRanges += [pscustomobject]@{ Start = $index; End = $afterStart }
+        }
+
+        $start = $index + [math]::Max($target.Length, 1)
+    }
+
+    if ($foundRanges.Count -eq 0) {
+        throw "Target text not found in element"
+    }
+    if ($foundRanges.Count -gt 1) {
+        throw "Target text is ambiguous; provide prefix or suffix"
+    }
+    return $foundRanges[0]
+}
+
+function Invoke-SelectText($element, [string]$target, [string]$prefix, [string]$suffix, [string]$selection) {
+    if ($null -eq $element) {
+        throw "unknown element_index"
+    }
+
+    $mode = if ([string]::IsNullOrWhiteSpace($selection)) { "text" } else { $selection.Trim() }
+    if (@("text", "cursor_before", "cursor_after") -notcontains $mode) {
+        throw "Invalid selection: $selection"
+    }
+
+    $textPattern = Get-CurrentPatternOrNull $element ([Windows.Automation.TextPattern]::Pattern)
+    if ($null -eq $textPattern) {
+        throw "Cannot select text for an element that does not expose text"
+    }
+
+    $document = $textPattern.DocumentRange
+    $value = $document.GetText(-1)
+    $match = Find-TextSelectionMatch $value $target $prefix $suffix
+    $start = [int]$match.Start
+    $end = [int]$match.End
+    if ($mode -eq "cursor_before") {
+        $end = $start
+    } elseif ($mode -eq "cursor_after") {
+        $start = $end
+    }
+
+    $range = $document.Clone()
+    [void]$range.MoveEndpointByUnit([Windows.Automation.TextPatternRangeEndpoint]::Start, [Windows.Automation.TextUnit]::Character, $start)
+    [void]$range.MoveEndpointByUnit([Windows.Automation.TextPatternRangeEndpoint]::End, [Windows.Automation.TextUnit]::Character, -1 * ($value.Length - $end))
+    if (-not (Test-EnvFlagEnabled "OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_SELECTION")) {
+        throw "UIA TextPattern selection is disabled by default because it may bring the target app to the foreground; set OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_SELECTION=1 to enable it."
+    }
+    $range.Select()
+}
+
 function Invoke-PreferredClick($element) {
     $invoke = Get-CurrentPatternOrNull $element ([Windows.Automation.InvokePattern]::Pattern)
     if ($null -ne $invoke) {
@@ -913,6 +982,9 @@ try {
                     $point = Get-ScreenPoint $operation.element.frame $windowBounds
                     Send-Scroll $hwnd $point.x $point.y $operation.direction ([double]$operation.pages)
                 }
+            }
+            "select_text" {
+                Invoke-SelectText $element $operation.text $operation.prefix $operation.suffix $operation.selection
             }
             "drag" {
                 Send-Drag $hwnd ([int][math]::Round($windowBounds.x + [double]$operation.from_x)) ([int][math]::Round($windowBounds.y + [double]$operation.from_y)) ([int][math]::Round($windowBounds.x + [double]$operation.to_x)) ([int][math]::Round($windowBounds.y + [double]$operation.to_y))

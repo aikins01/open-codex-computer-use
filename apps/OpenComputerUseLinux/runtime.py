@@ -691,6 +691,61 @@ def insert_text(root, text):
     )
 
 
+def text_selection_match(value, target, prefix=None, suffix=None):
+    if not target:
+        raise RuntimeError("Missing required argument: text")
+    prefix = prefix or ""
+    suffix = suffix or ""
+    matches = []
+    start = 0
+    while start <= len(value):
+        index = value.find(target, start)
+        if index < 0:
+            break
+        end = index + len(target)
+        before = value[:index]
+        after = value[end:]
+        if (not prefix or before.endswith(prefix)) and (not suffix or after.startswith(suffix)):
+            matches.append((index, end))
+        start = index + max(len(target), 1)
+    if not matches:
+        raise RuntimeError("Target text not found in element")
+    if len(matches) > 1:
+        raise RuntimeError("Target text is ambiguous; provide prefix or suffix")
+    return matches[0]
+
+
+def select_text_node(node, target, prefix=None, suffix=None, selection="text"):
+    if node is None:
+        raise RuntimeError("unknown element_index")
+    mode = (selection or "text").strip() or "text"
+    if mode not in {"text", "cursor_before", "cursor_after"}:
+        raise RuntimeError("Invalid selection: " + str(selection))
+    if not bool(safe(node.is_text, False)):
+        raise RuntimeError("Cannot select text for an element that does not expose text")
+    text_iface = safe(node.get_text_iface)
+    if text_iface is None:
+        raise RuntimeError("Cannot select text for an element that does not expose text")
+    count = int(safe(lambda: Atspi.Text.get_character_count(text_iface), 0) or 0)
+    value = str(safe(lambda: Atspi.Text.get_text(text_iface, 0, count), "") or "")
+    start, end = text_selection_match(value, str(target), prefix, suffix)
+    if mode == "cursor_before":
+        end = start
+    elif mode == "cursor_after":
+        start = end
+    if mode == "text":
+        selections = safe(lambda: Atspi.Text.get_text_selections(text_iface), []) or []
+        if selections:
+            if bool(safe(lambda: Atspi.Text.set_selection(text_iface, 0, start, end), False)):
+                return
+        if bool(safe(lambda: Atspi.Text.add_selection(text_iface, start, end), False)):
+            return
+        raise RuntimeError("Cannot select text for an element that does not expose a settable text selection range")
+    if bool(safe(lambda: Atspi.Text.set_caret_offset(text_iface, start), False)):
+        return
+    raise RuntimeError("Cannot place the text cursor for this element")
+
+
 def set_element_value(node, value):
     if node is not None and bool(safe(node.is_editable_text, False)):
         editable = safe(node.get_editable_text_iface)
@@ -776,6 +831,14 @@ def perform_operation(operation):
         invoke_secondary_action(element, operation.get("action", ""))
     elif tool == "scroll":
         scroll_element(operation.get("direction", "down"), operation.get("pages", 1))
+    elif tool == "select_text":
+        select_text_node(
+            element,
+            operation.get("text", ""),
+            operation.get("prefix"),
+            operation.get("suffix"),
+            operation.get("selection", "text"),
+        )
     elif tool == "drag":
         from_x, from_y = screen_point(
             bounds, None, operation.get("from_x"), operation.get("from_y")
