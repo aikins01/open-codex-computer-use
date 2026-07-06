@@ -75,7 +75,7 @@ Or add it to your own client manually:
 
 ### macOS image capture
 
-`get_app_state` and action tools return a PNG screenshot together with the accessibility tree. On macOS, screenshot size can be tuned with optional environment variables. Set them before starting the `open-computer-use` runtime process; changing shell environment values afterward does not affect an already running process.
+`get_app_state` returns a PNG screenshot together with the accessibility tree. Successful action tools return a compact acknowledgment and refresh the runtime's internal state; call `get_app_state` again when the next step needs updated UI context. On macOS, screenshot size can be tuned with optional environment variables. Set them before starting the `open-computer-use` runtime process; changing shell environment values afterward does not affect an already running process.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

@@ -80,6 +80,10 @@ func TestAppStateResultOutputControls(t *testing.T) {
 	if len(imageAfterTextOnly.Content) != 2 || imageAfterTextOnly.Content[1].Type != "image" {
 		t.Fatalf("image after text-only content = %#v, want text and image", imageAfterTextOnly.Content)
 	}
+	imageAfterTextOnlyChangePoll, _ := snapshot.appStateResult(appStateOutputOptions{IncludeImage: true, OnlyChanges: true}, &current)
+	if len(imageAfterTextOnlyChangePoll.Content) != 2 || imageAfterTextOnlyChangePoll.Content[0].Text != appStateNoChangeMessage || imageAfterTextOnlyChangePoll.Content[1].Type != "image" {
+		t.Fatalf("image after text-only change poll content = %#v, want no-change text and image", imageAfterTextOnlyChangePoll.Content)
+	}
 	deduped, _ := snapshot.appStateResult(defaultAppStateOutputOptions(), &currentWithImage)
 	if len(deduped.Content) != 1 {
 		t.Fatalf("deduped content = %#v, want text only", deduped.Content)
@@ -91,6 +95,26 @@ func TestAppStateResultOutputControls(t *testing.T) {
 	unchanged, _ := snapshot.appStateResult(appStateOutputOptions{IncludeImage: true, OnlyChanges: true}, &currentWithImage)
 	if unchanged.Content[0].Text != appStateNoChangeMessage {
 		t.Fatalf("unchanged text = %q, want no-change message", unchanged.Content[0].Text)
+	}
+	screenshotOnlyChanged := *snapshot
+	screenshotOnlyChanged.ScreenshotPNGBase64 = "image-b"
+	screenshotOnlyChangedResult, screenshotOnlyChangedCache := screenshotOnlyChanged.appStateResult(appStateOutputOptions{IncludeImage: true, OnlyChanges: true}, &currentWithImage)
+	if len(screenshotOnlyChangedResult.Content) != 1 || screenshotOnlyChangedResult.Content[0].Text != appStateNoChangeMessage {
+		t.Fatalf("screenshot-only change content = %#v, want no-change text only", screenshotOnlyChangedResult.Content)
+	}
+	repeatedScreenshotOnlyChangedResult, _ := screenshotOnlyChanged.appStateResult(appStateOutputOptions{IncludeImage: true, OnlyChanges: true}, &screenshotOnlyChangedCache)
+	if len(repeatedScreenshotOnlyChangedResult.Content) != 1 || repeatedScreenshotOnlyChangedResult.Content[0].Text != appStateNoChangeMessage {
+		t.Fatalf("repeated screenshot-only change content = %#v, want no-change text only", repeatedScreenshotOnlyChangedResult.Content)
+	}
+	fullAfterScreenshotOnlyChanged, _ := screenshotOnlyChanged.appStateResult(defaultAppStateOutputOptions(), &screenshotOnlyChangedCache)
+	if len(fullAfterScreenshotOnlyChanged.Content) != 2 || fullAfterScreenshotOnlyChanged.Content[1].Type != "image" {
+		t.Fatalf("full state after screenshot-only change content = %#v, want text and image", fullAfterScreenshotOnlyChanged.Content)
+	}
+	changedSnapshot := *snapshot
+	changedSnapshot.TreeLines = []string{"changed"}
+	changed, _ := changedSnapshot.appStateResult(appStateOutputOptions{IncludeImage: true, OnlyChanges: true}, &currentWithImage)
+	if !strings.Contains(changed.Content[0].Text, appStateDiffHeader) || !strings.Contains(changed.Content[0].Text, "~ 0123456789abcdef -> changed") {
+		t.Fatalf("changed text = %q, want compact diff", changed.Content[0].Text)
 	}
 }
 
@@ -189,6 +213,25 @@ func TestMCPInitializeResponseContainsToolsCapability(t *testing.T) {
 	capabilities := result["capabilities"].(map[string]any)
 	if _, ok := capabilities["tools"]; !ok {
 		t.Fatalf("missing tools capability: %#v", capabilities)
+	}
+}
+
+func TestMCPTurnEndedClearsRuntimeState(t *testing.T) {
+	svc := newService()
+	svc.snapshots["app"] = &appSnapshot{App: appDescriptor{Name: "App", PID: 1}}
+	svc.appStateOutputs["app"] = appStateOutputCache{RenderedText: "old"}
+
+	response := handleMCPRequest(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/turn-ended",
+		"params":  map[string]any{"type": "agent-turn-complete"},
+	}, svc)
+
+	if response != nil {
+		t.Fatalf("turn-ended response = %#v, want nil", response)
+	}
+	if len(svc.snapshots) != 0 || len(svc.appStateOutputs) != 0 {
+		t.Fatalf("runtime state was not cleared: snapshots=%d outputs=%d", len(svc.snapshots), len(svc.appStateOutputs))
 	}
 }
 

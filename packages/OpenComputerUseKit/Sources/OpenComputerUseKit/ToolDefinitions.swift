@@ -75,7 +75,7 @@ public enum ToolDefinitions {
                     "include_image": booleanProperty(description: "Return a screenshot image block when one is available. Defaults to true."),
                     "force_image": booleanProperty(description: "Return the screenshot even when it matches the previous app state for this app. Defaults to false."),
                     "max_text_chars": integerProperty(description: "Maximum characters to return from the rendered accessibility text. Set 0 for no post-render cap.", minimum: 0),
-                    "only_changes": booleanProperty(description: "Return only a no-change message when the rendered state and screenshot match the previous get_app_state result for this app. Defaults to false."),
+                    "only_changes": booleanProperty(description: "Return only accessibility-tree changes after the previous get_app_state result for this app: a no-change message when stable or a compact diff when changed. Defaults to false."),
                 ],
                 required: ["app"]
             )

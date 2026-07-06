@@ -463,6 +463,20 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(contentTypes(in: result), ["text", "image"])
     }
 
+    func testAppStateToolResultIncludesImageWhenChangePollingSwitchesFromTextOnly() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "same", screenshotPNGData: image, imageIncluded: false)
+        let result = appStateToolResult(
+            renderedText: "same",
+            screenshotPNGData: image,
+            previous: previous,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+
+        XCTAssertEqual(result.primaryText, appStateNoChangeMessage)
+        XCTAssertEqual(contentTypes(in: result), ["text", "image"])
+    }
+
     func testAppStateToolResultReturnsNoChangeWhenRequested() {
         let image = Data([1, 2, 3])
         let previous = AppStateOutputCache(renderedText: "same", screenshotPNGData: image, imageIncluded: true)
@@ -477,7 +491,7 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(contentTypes(in: result), ["text"])
     }
 
-    func testAppStateToolResultDoesNotReturnNoChangeWhenOnlyScreenshotMatches() {
+    func testAppStateToolResultReturnsDiffWhenAccessibilityChanges() {
         let image = Data([1, 2, 3])
         let previous = AppStateOutputCache(renderedText: "old", screenshotPNGData: image, imageIncluded: true)
         let result = appStateToolResult(
@@ -487,8 +501,39 @@ final class OpenComputerUseKitTests: XCTestCase {
             options: AppStateOutputOptions(onlyChanges: true)
         )
 
-        XCTAssertEqual(result.primaryText, "new")
+        XCTAssertTrue(result.primaryText?.contains(appStateDiffHeader) == true)
+        XCTAssertTrue(result.primaryText?.contains("~ old -> new") == true)
         XCTAssertEqual(contentTypes(in: result), ["text"])
+    }
+
+    func testAppStateToolResultTreatsScreenshotOnlyChangeAsNoAccessibilityChange() {
+        let previous = AppStateOutputCache(renderedText: "same", screenshotPNGData: Data([1, 2, 3]), imageIncluded: true)
+        let output = appStateToolResultWithCache(
+            renderedText: "same",
+            screenshotPNGData: Data([4, 5, 6]),
+            previous: previous,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+
+        XCTAssertEqual(output.result.primaryText, appStateNoChangeMessage)
+        XCTAssertEqual(contentTypes(in: output.result), ["text"])
+
+        let repeated = appStateToolResultWithCache(
+            renderedText: "same",
+            screenshotPNGData: Data([4, 5, 6]),
+            previous: output.cache,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+        let fullState = appStateToolResult(
+            renderedText: "same",
+            screenshotPNGData: Data([4, 5, 6]),
+            previous: output.cache,
+            options: .defaults
+        )
+
+        XCTAssertEqual(repeated.result.primaryText, appStateNoChangeMessage)
+        XCTAssertEqual(contentTypes(in: repeated.result), ["text"])
+        XCTAssertEqual(contentTypes(in: fullState), ["text", "image"])
     }
 
     func testNonNegativeIntegerArgumentAcceptsJSONNumbers() throws {
@@ -926,6 +971,17 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertNil(response)
     }
 
+    func testActionRequiresCapturedStateThisTurn() {
+        let service = ComputerUseService()
+
+        XCTAssertThrowsError(try service.click(app: "Sample", elementIndex: "1", x: nil, y: nil, clickCount: 1, mouseButton: "left")) { error in
+            XCTAssertEqual(
+                (error as? ComputerUseError)?.errorDescription,
+                "No app state is available for Sample. Run get_app_state before action tools."
+            )
+        }
+    }
+
     func testWindowRelativeFrameUsesSharedGlobalCoordinates() {
         let window = CGRect(x: 1486, y: 556, width: 919, height: 644)
         let child = CGRect(x: 1486, y: 556, width: 919, height: 644)
@@ -1261,6 +1317,118 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertTrue(rendered.contains("Selected text: [Codex]"))
         XCTAssertFalse(rendered.contains("Selected text: ```"))
         XCTAssertFalse(rendered.contains("Pay special attention to the content selected by the user"))
+    }
+
+    func testMatchingElementRejectsReusedIdentifierWithMovedFrame() {
+        let service = ComputerUseService()
+        let previousRecord = ElementRecord(
+            index: 1,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 10, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let reusedIdentifierRecord = ElementRecord(
+            index: 9,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 260, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let previous = makeSnapshot(
+            treeLines: ["\t1 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [1: previousRecord]
+        )
+        let refreshed = makeSnapshot(
+            treeLines: ["\t9 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [9: reusedIdentifierRecord]
+        )
+
+        XCTAssertNil(service.matchingElement(
+            previousRecord: previousRecord,
+            previousSnapshot: previous,
+            refreshedSnapshot: refreshed
+        ))
+    }
+
+    func testMatchingElementAllowsIdentifierWithStableLineAndFrame() {
+        let service = ComputerUseService()
+        let previousRecord = ElementRecord(
+            index: 1,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 10, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let refreshedRecord = ElementRecord(
+            index: 9,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 12, y: 22, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let previous = makeSnapshot(
+            treeLines: ["\t1 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [1: previousRecord]
+        )
+        let refreshed = makeSnapshot(
+            treeLines: ["\t9 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [9: refreshedRecord]
+        )
+
+        XCTAssertTrue(service.matchingElement(
+            previousRecord: previousRecord,
+            previousSnapshot: previous,
+            refreshedSnapshot: refreshed
+        ) === refreshedRecord)
+    }
+
+    func testFailedStaleRefetchDoesNotPublishUnmatchedSnapshot() throws {
+        let service = ComputerUseService()
+        let previousRecord = ElementRecord(
+            index: 1,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 10, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let changedRecord = ElementRecord(
+            index: 1,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 10, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let previous = makeSnapshot(
+            treeLines: ["\t1 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [1: previousRecord]
+        )
+        let refreshed = makeSnapshot(
+            treeLines: ["\t1 button Delete ID: compose-send"],
+            focusedSummary: nil,
+            elements: [1: changedRecord]
+        )
+
+        service.publishSnapshot(previous, for: "Sample Chat")
+
+        XCTAssertThrowsError(try service.publishRefetchedSnapshotIfElementMatches(
+            refreshed,
+            for: "Sample Chat",
+            previousSnapshot: previous,
+            previousRecord: previousRecord
+        ))
+        XCTAssertEqual(service.cachedSnapshot(for: "Sample Chat")?.treeLines, previous.treeLines)
     }
 
     func testAccessibilityTreeBudgetAllowsDeepElectronWebViews() {
@@ -2130,7 +2298,12 @@ final class OpenComputerUseKitTests: XCTestCase {
         result.content.compactMap { $0.dictionary["type"] as? String }
     }
 
-    private func makeSnapshot(treeLines: [String], focusedSummary: String?, selectedText: String? = nil) -> AppSnapshot {
+    private func makeSnapshot(
+        treeLines: [String],
+        focusedSummary: String?,
+        selectedText: String? = nil,
+        elements: [Int: ElementRecord] = [:]
+    ) -> AppSnapshot {
         AppSnapshot(
             app: RunningAppDescriptor(
                 name: "Sample Chat",
@@ -2144,11 +2317,12 @@ final class OpenComputerUseKitTests: XCTestCase {
             targetWindowLayer: nil,
             screenshotPNGData: nil,
             mode: .accessibility,
+            showFullText: false,
             treeLines: treeLines,
             focusedSummary: focusedSummary,
             focusedElement: nil,
             selectedText: selectedText,
-            elements: [:]
+            elements: elements
         )
     }
 

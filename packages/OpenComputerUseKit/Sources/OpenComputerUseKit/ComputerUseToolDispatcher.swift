@@ -75,6 +75,10 @@ public final class ComputerUseToolDispatcher {
         self.service = service
     }
 
+    public func resetTurnState() {
+        service.resetTurnState()
+    }
+
     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
         switch name {
         case "list_apps":

@@ -25,9 +25,18 @@ var version = "0.1.54"
 //go:embed runtime.py
 var linuxRuntimeScript string
 
-const serverInstructions = "Computer Use tools let you interact with Linux desktop apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, select_text, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Linux actions use AT-SPI2 semantic actions and editable text APIs first. Coordinate mouse and key synthesis are best-effort fallbacks and are not a universal Wayland background input model."
+const serverInstructions = "Computer Use tools let you interact with Linux desktop apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, select_text, drag, type_text, press_key, and set_value.\n\nAfter each action, call `get_app_state` to fetch the latest state before deciding the next UI action.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Linux actions use AT-SPI2 semantic actions and editable text APIs first. Coordinate mouse and key synthesis are best-effort fallbacks and are not a universal Wayland background input model."
 
 const appStateNoChangeMessage = "There has been no change"
+const actionCompletedMessage = "Action completed. Call `get_app_state` to fetch the updated UI state."
+
+const appStateDiffHeader = `The following is a diff from the previous accessibility tree
+with ~, +, and - representing changed, added, and removed elements, respectively.`
+
+const appStateDiffMaxLines = 240
+const appStateDiffMaxCharacters = 20000
+const appStateDiffLineCharacterLimit = 600
+const appStateDiffMaxComparableCells = 1000000
 
 type toolDefinition struct {
 	Name        string         `json:"name"`
@@ -60,9 +69,10 @@ type appStateOutputOptions struct {
 }
 
 type appStateOutputCache struct {
-	RenderedText        string
-	ScreenshotPNGBase64 string
-	ImageIncluded       bool
+	RenderedText                    string
+	ScreenshotPNGBase64             string
+	ImageIncluded                   bool
+	LastIncludedScreenshotPNGBase64 string
 }
 
 func (c appStateOutputCache) sameSnapshot(other appStateOutputCache) bool {
@@ -141,11 +151,6 @@ func (s *appSnapshot) renderedText() string {
 	return strings.Join(lines, "\n")
 }
 
-func (s *appSnapshot) result() toolCallResult {
-	result, _ := s.appStateResult(defaultAppStateOutputOptions(), nil)
-	return result
-}
-
 func (s *appSnapshot) appStateResult(options appStateOutputOptions, previous *appStateOutputCache) (toolCallResult, appStateOutputCache) {
 	renderedText := s.renderedText()
 	screenshot := ""
@@ -153,20 +158,28 @@ func (s *appSnapshot) appStateResult(options appStateOutputOptions, previous *ap
 		screenshot = s.ScreenshotPNGBase64
 	}
 	current := appStateOutputCache{RenderedText: renderedText, ScreenshotPNGBase64: screenshot}
-	if options.OnlyChanges && previous != nil && previous.sameSnapshot(current) {
-		return textResult(appStateNoChangeMessage, false), current
+	if previous != nil {
+		current.LastIncludedScreenshotPNGBase64 = previous.LastIncludedScreenshotPNGBase64
+	}
+	accessibilityUnchanged := options.OnlyChanges && previous != nil && previous.RenderedText == renderedText
+	text := limitedAppStateText(renderedText, options.MaxTextChars)
+	if options.OnlyChanges && previous != nil {
+		text = appStateChangeText(previous.RenderedText, renderedText, options.MaxTextChars)
 	}
 
 	result := toolCallResult{
-		Content: []contentItem{{Type: "text", Text: limitedAppStateText(renderedText, options.MaxTextChars)}},
+		Content: []contentItem{{Type: "text", Text: text}},
 	}
-	if options.IncludeImage && screenshot != "" && (options.ForceImage || previous == nil || !previous.ImageIncluded || previous.ScreenshotPNGBase64 != screenshot) {
+	callerHasImage := current.LastIncludedScreenshotPNGBase64 != ""
+	callerHasCurrentImage := current.LastIncludedScreenshotPNGBase64 == screenshot
+	if options.IncludeImage && screenshot != "" && (options.ForceImage || !callerHasImage || (!accessibilityUnchanged && !callerHasCurrentImage)) {
 		result.Content = append(result.Content, contentItem{
 			Type:     "image",
 			Data:     screenshot,
 			MimeType: "image/png",
 		})
 		current.ImageIncluded = true
+		current.LastIncludedScreenshotPNGBase64 = screenshot
 	}
 	return result, current
 }
@@ -185,6 +198,149 @@ func limitedAppStateText(text string, maxChars *int) string {
 		return string(runes[:*maxChars])
 	}
 	return string(runes[:*maxChars-len(suffixRunes)]) + suffix
+}
+
+func appStateChangeText(previous string, current string, maxChars *int) string {
+	if previous == current {
+		return appStateNoChangeMessage
+	}
+	diff := appStateDiffText(previous, current)
+	if maxChars != nil {
+		return limitedAppStateText(diff, maxChars)
+	}
+	defaultMaxChars := appStateDiffMaxCharacters
+	return limitedAppStateText(diff, &defaultMaxChars)
+}
+
+func appStateDiffText(previous string, current string) string {
+	previousLines := strings.Split(previous, "\n")
+	currentLines := strings.Split(current, "\n")
+	if len(previousLines) > 0 && len(currentLines) > appStateDiffMaxComparableCells/len(previousLines) {
+		return strings.Join(append([]string{appStateDiffHeader, "[line diff omitted because the accessibility trees are too large]"}, appStateCurrentTreePreviewLines(currentLines)...), "\n")
+	}
+	operations := appStateDiffOperations(previousLines, currentLines)
+	lines := appStateFormattedDiffLines(operations)
+	return strings.Join(append([]string{appStateDiffHeader}, lines...), "\n")
+}
+
+func appStateCurrentTreePreviewLines(lines []string) []string {
+	limit := min(len(lines), appStateDiffMaxLines)
+	preview := make([]string, 0, limit+1)
+	for _, line := range lines[:limit] {
+		preview = append(preview, "+ "+limitedAppStateDiffLine(line))
+	}
+	if len(lines) > appStateDiffMaxLines {
+		preview = append(preview, fmt.Sprintf("[diff truncated after %d changed lines]", appStateDiffMaxLines))
+	}
+	return preview
+}
+
+type appStateDiffOperation struct {
+	prefix string
+	line   string
+}
+
+func appStateDiffOperations(previousLines []string, currentLines []string) []appStateDiffOperation {
+	width := len(currentLines) + 1
+	table := make([]int, (len(previousLines)+1)*width)
+	tableIndex := func(previousIndex int, currentIndex int) int {
+		return previousIndex*width + currentIndex
+	}
+
+	for previousIndex := 1; previousIndex <= len(previousLines); previousIndex++ {
+		for currentIndex := 1; currentIndex <= len(currentLines); currentIndex++ {
+			if previousLines[previousIndex-1] == currentLines[currentIndex-1] {
+				table[tableIndex(previousIndex, currentIndex)] = table[tableIndex(previousIndex-1, currentIndex-1)] + 1
+			} else if table[tableIndex(previousIndex-1, currentIndex)] > table[tableIndex(previousIndex, currentIndex-1)] {
+				table[tableIndex(previousIndex, currentIndex)] = table[tableIndex(previousIndex-1, currentIndex)]
+			} else {
+				table[tableIndex(previousIndex, currentIndex)] = table[tableIndex(previousIndex, currentIndex-1)]
+			}
+		}
+	}
+
+	previousIndex := len(previousLines)
+	currentIndex := len(currentLines)
+	reversed := make([]appStateDiffOperation, 0)
+	for previousIndex > 0 || currentIndex > 0 {
+		if previousIndex > 0 && currentIndex > 0 && previousLines[previousIndex-1] == currentLines[currentIndex-1] {
+			previousIndex--
+			currentIndex--
+		} else if currentIndex > 0 && (previousIndex == 0 || table[tableIndex(previousIndex, currentIndex-1)] >= table[tableIndex(previousIndex-1, currentIndex)]) {
+			reversed = append(reversed, appStateDiffOperation{prefix: "+", line: currentLines[currentIndex-1]})
+			currentIndex--
+		} else {
+			reversed = append(reversed, appStateDiffOperation{prefix: "-", line: previousLines[previousIndex-1]})
+			previousIndex--
+		}
+	}
+
+	operations := make([]appStateDiffOperation, len(reversed))
+	for i := range reversed {
+		operations[len(reversed)-1-i] = reversed[i]
+	}
+	return operations
+}
+
+func appStateFormattedDiffLines(operations []appStateDiffOperation) []string {
+	lines := make([]string, 0)
+	operationIndex := 0
+	truncated := false
+	appendLine := func(line string) {
+		if len(lines) >= appStateDiffMaxLines {
+			truncated = true
+			return
+		}
+		lines = append(lines, line)
+	}
+
+	for operationIndex < len(operations) && !truncated {
+		if operations[operationIndex].prefix == "-" {
+			removals := make([]string, 0)
+			for operationIndex < len(operations) && operations[operationIndex].prefix == "-" {
+				removals = append(removals, operations[operationIndex].line)
+				operationIndex++
+			}
+			additions := make([]string, 0)
+			for operationIndex < len(operations) && operations[operationIndex].prefix == "+" {
+				additions = append(additions, operations[operationIndex].line)
+				operationIndex++
+			}
+			for index := 0; index < max(len(removals), len(additions)); index++ {
+				if index < len(removals) && index < len(additions) {
+					appendLine("~ " + limitedAppStateDiffLine(removals[index]) + " -> " + limitedAppStateDiffLine(additions[index]))
+				} else if index < len(removals) {
+					appendLine("- " + limitedAppStateDiffLine(removals[index]))
+				} else {
+					appendLine("+ " + limitedAppStateDiffLine(additions[index]))
+				}
+			}
+		} else {
+			appendLine("+ " + limitedAppStateDiffLine(operations[operationIndex].line))
+			operationIndex++
+		}
+	}
+
+	if len(lines) == 0 {
+		lines = append(lines, "[accessibility tree changed, but no line-level diff was produced]")
+	}
+	if truncated {
+		lines = append(lines, fmt.Sprintf("[diff truncated after %d changed lines]", appStateDiffMaxLines))
+	}
+	return lines
+}
+
+func limitedAppStateDiffLine(line string) string {
+	runes := []rune(line)
+	if len(runes) <= appStateDiffLineCharacterLimit {
+		return line
+	}
+	suffix := " ... [line truncated]"
+	suffixRunes := []rune(suffix)
+	if appStateDiffLineCharacterLimit <= len(suffixRunes) {
+		return string(runes[:appStateDiffLineCharacterLimit])
+	}
+	return string(runes[:appStateDiffLineCharacterLimit-len(suffixRunes)]) + suffix
 }
 
 type linuxRequest struct {
@@ -226,6 +382,11 @@ type service struct {
 
 func newService() *service {
 	return &service{snapshots: map[string]*appSnapshot{}, appStateOutputs: map[string]appStateOutputCache{}}
+}
+
+func (s *service) resetTurnState() {
+	clear(s.snapshots)
+	clear(s.appStateOutputs)
 }
 
 func (s *service) callTool(name string, args map[string]any) toolCallResult {
@@ -487,11 +648,11 @@ func (s *service) setValue(app, elementIndex, value string) toolCallResult {
 }
 
 func (s *service) actionResult(app string, request linuxRequest) toolCallResult {
-	snapshot, result := s.refreshSnapshot(app, request)
+	_, result := s.refreshSnapshot(app, request)
 	if result.IsError {
 		return result
 	}
-	return snapshot.result()
+	return textResult(actionCompletedMessage, false)
 }
 
 func (s *service) currentSnapshot(app string) *appSnapshot {
@@ -1213,7 +1374,7 @@ func toolDefinitions() []toolDefinition {
 				"include_image":  booleanProperty("Return a screenshot image block when one is available. Defaults to true."),
 				"force_image":    booleanProperty("Return the screenshot even when it matches the previous app state for this app. Defaults to false."),
 				"max_text_chars": integerProperty("Maximum characters to return from the rendered accessibility text. Set 0 for no post-render cap.", 0),
-				"only_changes":   booleanProperty("Return only a no-change message when the rendered state and screenshot match the previous get_app_state result for this app. Defaults to false."),
+				"only_changes":   booleanProperty("Return only accessibility-tree changes after the previous get_app_state result for this app: a no-change message when stable or a compact diff when changed. Defaults to false."),
 			}, []string{"app"}),
 		},
 		{
@@ -1615,7 +1776,10 @@ func handleMCPRequest(request map[string]any, svc *service) map[string]any {
 			"capabilities": map[string]any{"tools": map[string]any{"listChanged": false}},
 			"instructions": serverInstructions,
 		})
-	case "notifications/initialized", "notifications/turn-ended":
+	case "notifications/initialized":
+		return nil
+	case "notifications/turn-ended":
+		svc.resetTurnState()
 		return nil
 	case "ping":
 		return jsonRPCResult(id, map[string]any{})

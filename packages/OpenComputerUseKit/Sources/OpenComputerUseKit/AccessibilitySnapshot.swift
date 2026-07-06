@@ -151,6 +151,7 @@ public struct AppSnapshot {
     let targetWindowLayer: Int?
     public let screenshotPNGData: Data?
     let mode: SnapshotMode
+    let showFullText: Bool
     let treeLines: [String]
     let focusedSummary: String?
     let focusedElement: AXUIElement?
@@ -279,6 +280,7 @@ enum SnapshotBuilder {
             targetWindowLayer: windowCapture.layer,
             screenshotPNGData: screenshotPNGData,
             mode: .accessibility,
+            showFullText: showFullText,
             treeLines: renderer.lines,
             focusedSummary: renderer.focusedSummary,
             focusedElement: focusedElement,
@@ -434,6 +436,7 @@ enum SnapshotBuilder {
             targetWindowLayer: nil,
             screenshotPNGData: nil,
             mode: .fixture,
+            showFullText: false,
             treeLines: lines,
             focusedSummary: focusedSummary,
             focusedElement: nil,

@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Open Computer Use",
     "shortDescription": "Control desktop apps from Codex with the open local server",
-    "longDescription": "Open Computer Use packages this repository's open-source desktop automation server as a Codex plugin. It exposes the same ten desktop-control MCP tools through a local macOS app bundle or Linux / Windows native binary, with semantic accessibility paths preferred before fallback input.",
+    "longDescription": "Open Computer Use packages this repository's open-source desktop automation server as a Codex plugin. It exposes the same ten desktop-control MCP tools through a local macOS app bundle or Linux / Windows native binary, with semantic accessibility paths preferred before fallback input and compact state-diff controls for long-running agent threads.",
     "developerName": "Leo",
     "category": "Productivity",
     "capabilities": [
@@ -32,7 +32,7 @@
     "privacyPolicyURL": "https://github.com/iFurySt/open-codex-computer-use/blob/main/SECURITY.md",
     "termsOfServiceURL": "https://github.com/iFurySt/open-codex-computer-use/blob/main/LICENSE",
     "defaultPrompt": [
-      "Inspect the current UI state of this desktop app without stealing focus when possible",
+      "Inspect current UI state with compact text-only diffs when polling before the next action",
       "Open a new local document with keyboard shortcuts first, then type content without moving my real pointer unless required",
       "Drive the fixture app and verify the ten computer-use tools still behave correctly"
     ],

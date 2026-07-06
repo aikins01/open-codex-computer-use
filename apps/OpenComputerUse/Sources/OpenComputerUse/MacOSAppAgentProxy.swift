@@ -154,6 +154,7 @@ private struct CLIProxyResponse {
 @MainActor
 private final class MacOSAppAgentRuntime: NSObject, NSApplicationDelegate {
     private let socketPath: String
+    private let connectionRegistry = AppAgentConnectionRegistry()
     private var listener: AppAgentSocketListener?
     private var turnEndedObserver: NSObjectProtocol?
 
@@ -175,14 +176,17 @@ private final class MacOSAppAgentRuntime: NSObject, NSApplicationDelegate {
             forName: openComputerUseTurnEndedNotificationName,
             object: nil,
             queue: .main
-        ) { _ in
+        ) { [connectionRegistry] _ in
+            DispatchQueue.global(qos: .utility).async {
+                connectionRegistry.resetTurnState()
+            }
             Task { @MainActor in
                 resetOpenComputerUseVisualCursor()
             }
         }
 
         do {
-            let listener = try AppAgentSocketListener(path: socketPath)
+            let listener = try AppAgentSocketListener(path: socketPath, connectionRegistry: connectionRegistry)
             self.listener = listener
             listener.start()
         } catch {
@@ -208,13 +212,43 @@ private final class MacOSAppAgentRuntime: NSObject, NSApplicationDelegate {
     }
 }
 
+private final class AppAgentConnectionRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connections: [ObjectIdentifier: AppAgentConnection] = [:]
+
+    func insert(_ connection: AppAgentConnection) {
+        lock.lock()
+        connections[ObjectIdentifier(connection)] = connection
+        lock.unlock()
+    }
+
+    func remove(_ connection: AppAgentConnection) {
+        lock.lock()
+        connections.removeValue(forKey: ObjectIdentifier(connection))
+        lock.unlock()
+    }
+
+    func resetTurnState() {
+        let snapshot: [AppAgentConnection]
+        lock.lock()
+        snapshot = Array(connections.values)
+        lock.unlock()
+
+        for connection in snapshot {
+            connection.resetTurnState()
+        }
+    }
+}
+
 private final class AppAgentSocketListener: @unchecked Sendable {
     private let path: String
     private let socketFD: Int32
+    private let connectionRegistry: AppAgentConnectionRegistry
     private var running = true
 
-    init(path: String) throws {
+    init(path: String, connectionRegistry: AppAgentConnectionRegistry) throws {
         self.path = path
+        self.connectionRegistry = connectionRegistry
         unlink(path)
 
         socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -283,7 +317,7 @@ private final class AppAgentSocketListener: @unchecked Sendable {
             }
 
             Thread.detachNewThread {
-                AppAgentConnection(fileDescriptor: clientFD).run()
+                AppAgentConnection(fileDescriptor: clientFD, connectionRegistry: self.connectionRegistry).run()
             }
         }
     }
@@ -291,10 +325,12 @@ private final class AppAgentSocketListener: @unchecked Sendable {
 
 private final class AppAgentConnection: @unchecked Sendable {
     private let fileDescriptor: Int32
+    private let connectionRegistry: AppAgentConnectionRegistry
     private let server = StdioMCPServer()
 
-    init(fileDescriptor: Int32) {
+    init(fileDescriptor: Int32, connectionRegistry: AppAgentConnectionRegistry) {
         self.fileDescriptor = fileDescriptor
+        self.connectionRegistry = connectionRegistry
     }
 
     func run() {
@@ -302,12 +338,20 @@ private final class AppAgentConnection: @unchecked Sendable {
             close(fileDescriptor)
             return
         }
-        defer { fclose(file) }
+        connectionRegistry.insert(self)
+        defer {
+            connectionRegistry.remove(self)
+            fclose(file)
+        }
 
         while let line = readAgentLine(file) {
             let response = handle(requestLine: line)
             writeAgentLine(response, to: file)
         }
+    }
+
+    func resetTurnState() {
+        server.resetTurnState()
     }
 
     private func handle(requestLine: String) -> [String: Any] {

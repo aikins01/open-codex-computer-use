@@ -213,96 +213,105 @@ enum OpenComputerUseSmokeSuite {
         let initialCounter = parseCounterValue(state)
 
         print("3. click element_index")
-        state = try client.callTool("click", arguments: [
+        try expectActionCompleted(try client.callTool("click", arguments: [
             "app": appName,
             "element_index": index["fixture-increment"]!.index,
-        ])
+        ]), "click should return a compact action acknowledgement")
+        state = try refreshState(client, appName: appName)
         try expect(parseCounterValue(state) == initialCounter + 1, "click should increment the counter")
 
         print("4. click coordinate")
         index = parseElementIndex(state)
         let buttonFrame = index["fixture-increment"]!.frame
-        state = try client.callTool("click", arguments: [
+        try expectActionCompleted(try client.callTool("click", arguments: [
             "app": appName,
             "x": buttonFrame.midX,
             "y": buttonFrame.midY,
-        ])
+        ]), "coordinate click should return a compact action acknowledgement")
+        state = try refreshState(client, appName: appName)
         try expect(parseCounterValue(state) == initialCounter + 2, "coordinate click should increment the counter again")
 
         print("5. perform_secondary_action")
         let windowIndex = index["fixture-window"]?.index ?? "0"
-        _ = try client.callTool("perform_secondary_action", arguments: [
+        try expectActionCompleted(try client.callTool("perform_secondary_action", arguments: [
             "app": appName,
             "element_index": windowIndex,
             "action": "Raise",
-        ])
+        ]), "perform_secondary_action should return a compact action acknowledgement")
 
         print("6. set_value")
-        state = try client.callTool("set_value", arguments: [
+        try expectActionCompleted(try client.callTool("set_value", arguments: [
             "app": appName,
             "element_index": index["fixture-input"]!.index,
             "value": "set-value-ok",
-        ])
+        ]), "set_value should return a compact action acknowledgement")
+        state = try refreshState(client, appName: appName)
         try expect(state.contains("set-value-ok"), "set_value should update the text field")
 
         print("7. type_text")
+        index = parseElementIndex(state)
         let inputFrame = index["fixture-input"]!.frame
-        _ = try client.callTool("click", arguments: [
+        try expectActionCompleted(try client.callTool("click", arguments: [
             "app": appName,
             "x": inputFrame.midX,
             "y": inputFrame.midY,
-        ])
-        state = try client.callTool("type_text", arguments: [
+        ]), "input click should return a compact action acknowledgement")
+        try expectActionCompleted(try client.callTool("type_text", arguments: [
             "app": appName,
             "text": "-typed",
-        ])
+        ]), "type_text should return a compact action acknowledgement")
+        state = try refreshState(client, appName: appName)
         try expect(state.contains("set-value-ok-typed"), "type_text should append literal text to the focused text field")
 
         print("8. select_text")
-        state = try client.callTool("select_text", arguments: [
+        try expectActionCompleted(try client.callTool("select_text", arguments: [
             "app": appName,
             "element_index": index["fixture-input"]!.index,
             "text": "value-ok",
             "prefix": "set-",
             "suffix": "-typed",
-        ])
+        ]), "select_text should return a compact action acknowledgement")
+        state = try refreshState(client, appName: appName)
         try expect(state.contains("Selected text: [value-ok]"), "select_text should select the requested substring")
 
         print("9. press_key")
         index = parseElementIndex(state)
         let keyCaptureFrame = index["fixture-key-capture"]!.frame
-        _ = try client.callTool("click", arguments: [
+        try expectActionCompleted(try client.callTool("click", arguments: [
             "app": appName,
             "x": keyCaptureFrame.midX,
             "y": keyCaptureFrame.midY,
-        ])
-        state = try client.callTool("press_key", arguments: [
+        ]), "key capture click should return a compact action acknowledgement")
+        try expectActionCompleted(try client.callTool("press_key", arguments: [
             "app": appName,
             "key": "Return",
-        ])
+        ]), "press_key should return a compact action acknowledgement")
+        state = try refreshState(client, appName: appName)
         try expect(state.contains("Last key: Return"), "press_key should update the key capture view")
 
         print("10. scroll")
         index = parseElementIndex(state)
         let scrollIndex = index["fixture-scroll-view"]!.index
-        state = try client.callTool("scroll", arguments: [
+        try expectActionCompleted(try client.callTool("scroll", arguments: [
             "app": appName,
             "direction": "down",
             "element_index": scrollIndex,
             "pages": 1,
-        ])
+        ]), "scroll should return a compact action acknowledgement")
+        state = try refreshState(client, appName: appName)
         try expect(!state.contains("Scroll offset: 0"), "scroll should move the scroll view")
 
         print("11. drag")
         index = parseElementIndex(state)
         let dragFrame = index["fixture-drag-pad"]!.frame
-        state = try client.callTool("drag", arguments: [
+        try expectActionCompleted(try client.callTool("drag", arguments: [
             "app": appName,
             "from_x": dragFrame.minX + 30,
             "from_y": dragFrame.minY + 30,
             "to_x": dragFrame.maxX - 30,
             "to_y": dragFrame.maxY - 30,
-        ])
+        ]), "drag should return a compact action acknowledgement")
+        state = try refreshState(client, appName: appName)
         try expect(state.contains("Last drag:"), "drag should update the drag status label")
         try expect(!state.contains("Last drag: none"), "drag should report a captured path")
 
@@ -328,10 +337,11 @@ enum OpenComputerUseSmokeSuite {
         ])
 
         print("2. trigger click and wait for idle overlay")
-        let state = try client.callTool("click", arguments: [
+        try expectActionCompleted(try client.callTool("click", arguments: [
             "app": appName,
             "element_index": "1",
-        ])
+        ]), "cursor smoke click should return a compact action acknowledgement")
+        let state = try refreshState(client, appName: appName)
         try expect(state.contains("Counter:"), "cursor smoke click should still return fixture state")
 
         let firstIdleSnapshot = try waitForCursorObservation(at: observationURL, phase: "idle")
@@ -376,6 +386,16 @@ enum OpenComputerUseSmokeSuite {
         guard condition() else {
             throw SmokeError.message(message)
         }
+    }
+
+    private static func refreshState(_ client: MCPClient, appName: String) throws -> String {
+        try client.callTool("get_app_state", arguments: [
+            "app": appName,
+        ])
+    }
+
+    private static func expectActionCompleted(_ text: String, _ message: String) throws {
+        try expect(text.contains("Action completed"), message)
     }
 
     private static func terminateExistingFixtures(named name: String) {

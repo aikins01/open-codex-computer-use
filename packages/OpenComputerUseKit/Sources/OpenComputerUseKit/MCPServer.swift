@@ -11,14 +11,15 @@ The available tools are list_apps, get_app_state, click, perform_secondary_actio
 
 Computer Use tools allow you to use the user's apps in the background, so while you're using an app, the user can continue to use other apps on their computer. Avoid doing anything that would disrupt the user's active session, such as overwriting the contents of their clipboard, unless they asked you to!
 
-After each action, use the action result or fetch the latest state to verify the UI changed as expected.
+After each action, call `get_app_state` to fetch the latest state before deciding the next UI action.
 Prefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Note that element indices are the sequential integers from the app state's accessibility tree.
 Avoid falling back to AppleScript during a computer use session. Prefer Computer Use tools as much as possible to complete tasks.
 Ask the user before taking destructive or externally visible actions such as sending, deleting, or purchasing. If helpful, you can ask follow-up questions before taking action to make sure you’re understanding the user’s request correctly.
 """
 
-public final class StdioMCPServer {
+public final class StdioMCPServer: @unchecked Sendable {
     private let dispatcher: ComputerUseToolDispatcher
+    private let dispatcherLock = NSLock()
 
     public init(service: ComputerUseService = ComputerUseService()) {
         self.dispatcher = ComputerUseToolDispatcher(service: service)
@@ -67,9 +68,7 @@ public final class StdioMCPServer {
             case "notifications/initialized":
                 return nil
             case "notifications/turn-ended":
-                VisualCursorSupport.performOnMain {
-                    SoftwareCursorOverlay.reset()
-                }
+                resetTurnState()
                 return nil
             case "ping":
                 return try encodeJSONRPCResult(id: id, result: [:])
@@ -83,7 +82,7 @@ public final class StdioMCPServer {
             case "tools/call":
                 let name = params["name"] as? String ?? ""
                 let arguments = params["arguments"] as? [String: Any] ?? [:]
-                let result = try dispatcher.callTool(name: name, arguments: arguments)
+                let result = try callTool(name: name, arguments: arguments)
                 return try encodeJSONRPCResult(
                     id: id,
                     result: result.asDictionary
@@ -117,6 +116,23 @@ public final class StdioMCPServer {
                 ]
             )
         }
+    }
+
+    public func resetTurnState() {
+        dispatcherLock.lock()
+        dispatcher.resetTurnState()
+        dispatcherLock.unlock()
+        VisualCursorSupport.performOnMain {
+            SoftwareCursorOverlay.reset()
+        }
+    }
+
+    private func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        dispatcherLock.lock()
+        defer {
+            dispatcherLock.unlock()
+        }
+        return try dispatcher.callTool(name: name, arguments: arguments)
     }
 
     private func encodeJSONRPCResult(id: Any?, result: [String: Any]) throws -> String {

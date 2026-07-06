@@ -44,14 +44,12 @@ set_value
 
 ## Direct CLI Tool Calls
 
-Use `call` for one-off checks:
+Use `call` for one-off state checks:
 
 ```sh
 open-computer-use call list_apps
 ocu call list_apps
 open-computer-use call get_app_state --args '{"app":"TextEdit"}'
-open-computer-use call select_text --args '{"app":"TextEdit","element_index":"1","text":"Draft"}'
-open-computer-use call set_value --args '{"app":"TextEdit","element_index":"1","value":"Draft"}'
 ```
 
 Use `--calls` for short action sequences that need to reuse the same process state:
@@ -59,6 +57,7 @@ Use `--calls` for short action sequences that need to reuse the same process sta
 ```sh
 open-computer-use call --calls '[
   {"tool":"get_app_state","args":{"app":"TextEdit"}},
+  {"tool":"set_value","args":{"app":"TextEdit","element_index":"1","value":"Draft"}},
   {"tool":"click","args":{"app":"TextEdit","element_index":"1"}},
   {"tool":"type_text","args":{"app":"TextEdit","text":"Hello"}}
 ]'
@@ -87,13 +86,13 @@ For context-budgeted hosts, `get_app_state` also accepts output controls on macO
 
 ```sh
 open-computer-use call get_app_state --args '{"app":"TextEdit","include_image":false,"max_text_chars":20000}'
-open-computer-use call get_app_state --args '{"app":"TextEdit","only_changes":true}'
+open-computer-use call get_app_state --args '{"app":"TextEdit","include_image":false,"only_changes":true,"max_text_chars":20000}'
 open-computer-use call get_app_state --args '{"app":"TextEdit","include_image":true,"force_image":true}'
 ```
 
-Use `include_image:false` to omit screenshot content, `force_image:true` to return a repeated screenshot, `max_text_chars:0` for no post-render cap, and `only_changes:true` to receive `There has been no change` when rendered text and screenshot match the previous `get_app_state` result for that app.
+Use `include_image:false` to omit screenshot content, `force_image:true` to return a repeated screenshot, and `max_text_chars:0` for no post-render cap. Use `only_changes:true` for repeated checks: the first call records the app state, later calls return `There has been no change` when the accessibility tree is stable or a compact accessibility-tree diff when it changed. For long Amp, Claude, Codex, or other budget-sensitive threads, prefer `include_image:false`, `only_changes:true`, and `max_text_chars:20000` unless the image is required for the next action.
 
-Action tools return refreshed app state with the default 500 character text limit. If full text is still needed after an action, run `get_app_state` again with `show_full_text: true`.
+Action tools return `Action completed. Call \`get_app_state\` to fetch the updated UI state.` after success and refresh the runtime's internal snapshot cache. Run `get_app_state` again after an action when the next step depends on updated UI state; use `show_full_text:true` only when complete long text is needed.
 
 ## Choosing Targets
 

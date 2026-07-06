@@ -30,9 +30,9 @@ final class MCPAppRuntime: NSObject, NSApplicationDelegate {
             forName: openComputerUseTurnEndedNotificationName,
             object: nil,
             queue: .main
-        ) { _ in
-            Task { @MainActor in
-                resetOpenComputerUseVisualCursor()
+        ) { [server] _ in
+            DispatchQueue.global(qos: .utility).async {
+                server.resetTurnState()
             }
         }
         Thread.detachNewThreadSelector(#selector(processStandardIO), toTarget: self, with: nil)
