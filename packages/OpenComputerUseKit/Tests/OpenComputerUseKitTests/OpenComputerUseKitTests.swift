@@ -1105,6 +1105,70 @@ final class OpenComputerUseKitTests: XCTestCase {
         )
     }
 
+    func testSecondaryActionMatchingAcceptsNamedActionShortName() {
+        let service = ComputerUseService()
+        let closeTabAction = "Name:close tab Target:SafariTab Selector:_close Button Clicked:"
+        let record = ElementRecord(
+            index: 48,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXButtonRole as String,
+            rawActions: [kAXPressAction as String, closeTabAction],
+            prettyActions: [secondaryActionDisplayName(closeTabAction)]
+        )
+
+        XCTAssertEqual(service.matchingAction(requested: "close tab", record: record), closeTabAction)
+    }
+
+    func testSecondaryActionMatchingKeepsRenderedActionsAlignedWithRawActions() {
+        let service = ComputerUseService()
+        let record = ElementRecord(
+            index: 12,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXWindowRole as String,
+            rawActions: [kAXPressAction as String, kAXRaiseAction as String],
+            prettyActions: ["Raise"]
+        )
+
+        XCTAssertEqual(service.matchingAction(requested: "Raise", record: record), kAXRaiseAction as String)
+        XCTAssertEqual(service.matchingAction(requested: "AXRaise", record: record), kAXRaiseAction as String)
+    }
+
+    func testSecondaryActionMatchingAcceptsWindowRaiseDisplayName() {
+        let service = ComputerUseService()
+        let record = ElementRecord(
+            index: 0,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXWindowRole as String,
+            rawActions: [kAXRaiseAction as String],
+            prettyActions: ["Raise"]
+        )
+
+        XCTAssertEqual(service.matchingAction(requested: "Raise", record: record), kAXRaiseAction as String)
+    }
+
+    func testSecondaryActionMatchingRejectsFilteredActionAliases() {
+        let service = ComputerUseService()
+        let visibleShowMenuAction = "Name:show menu Target:SafariButton Selector:_show Menu:"
+        let hiddenInternalAction = ElementRecord(
+            index: 21,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXButtonRole as String,
+            rawActions: [kAXShowMenuAction as String, visibleShowMenuAction],
+            prettyActions: [secondaryActionDisplayName(visibleShowMenuAction)]
+        )
+
+        XCTAssertEqual(service.matchingAction(requested: "show menu", record: hiddenInternalAction), visibleShowMenuAction)
+        XCTAssertNil(service.matchingAction(requested: kAXShowMenuAction as String, record: hiddenInternalAction))
+    }
+
     func testSyntheticTextClickUsesLeadingSafePointOnly() {
         let frame = CGRect(x: 40, y: 20, width: 300, height: 48)
         let points = localClickActionPoints(frame: frame, isSyntheticText: true)
@@ -1607,6 +1671,16 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(meaningfulActions(["AXZoomWindow"], role: kAXButtonRole as String), ["zoom the window"])
     }
 
+    func testAccessibilityRendererUsesNamedActionDescription() {
+        XCTAssertEqual(
+            meaningfulActions(
+                ["Name:close tab Target:SafariTab Selector:_close Button Clicked:"],
+                role: kAXButtonRole as String
+            ),
+            ["close tab"]
+        )
+    }
+
     func testAccessibilityRendererKeepsLinkRoleWhenSuppressingChildren() {
         XCTAssertEqual(
             displayRoleText(
@@ -1752,6 +1826,24 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertTrue(globalPointerFallbacksEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "yes"]))
         XCTAssertFalse(globalPointerFallbacksEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "0"]))
         XCTAssertFalse(globalPointerFallbacksEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "false"]))
+    }
+
+    func testInputFallbackDebugFlagIsIndependentFromPointerFallbackFlag() {
+        XCTAssertTrue(inputFallbackDebugEnabled(environment: ["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS": "1"]))
+        XCTAssertFalse(globalPointerFallbacksEnabled(environment: ["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS": "1"]))
+        XCTAssertFalse(inputFallbackDebugEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]))
+    }
+
+    func testGlobalKeyboardInputFlagDefaultsToDisabled() {
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: [:]))
+        XCTAssertTrue(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "1"]))
+        XCTAssertTrue(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": " TRUE "]))
+        XCTAssertTrue(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "yes"]))
+        XCTAssertTrue(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "on"]))
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": ""]))
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "0"]))
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "false"]))
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "maybe"]))
     }
 
     func testSetValueAttributeGateMatchesOfficialSettableBoundary() throws {

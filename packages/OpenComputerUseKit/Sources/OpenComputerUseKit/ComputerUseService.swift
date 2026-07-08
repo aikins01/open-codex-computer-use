@@ -120,6 +120,17 @@ func globalPointerFallbacksEnabled(environment: [String: String]) -> Bool {
     return ["1", "true", "yes", "on"].contains(rawValue)
 }
 
+func globalKeyboardInputEnabled(environment: [String: String]) -> Bool {
+    guard let rawValue = environment["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    else {
+        return false
+    }
+
+    return ["1", "true", "yes", "on"].contains(rawValue)
+}
+
 func screenshotPixelScale(
     screenshotPixelSize: CGSize?,
     windowBounds: CGRect?
@@ -1066,7 +1077,14 @@ public final class ComputerUseService {
             return try actionCompletedResult(afterRefreshing: query)
         }
 
-        try InputSimulation.pressKey(key, pid: snapshot.app.pid)
+        if globalKeyboardInputEnabled(environment: ProcessInfo.processInfo.environment) {
+            debugInputFallback(tool: "press_key", targetDescription: key, snapshot: snapshot)
+            try InputSimulation.prepareAppForGlobalKeyboardInput(snapshot.app)
+            try InputSimulation.pressKeyGlobally(key)
+        } else {
+            try InputSimulation.pressKey(key, pid: snapshot.app.pid)
+        }
+
         return try actionCompletedResult(afterRefreshing: query)
     }
 
@@ -1167,13 +1185,18 @@ public final class ComputerUseService {
         return record
     }
 
-    private func matchingAction(requested: String, record: ElementRecord) -> String? {
-        if let exact = record.rawActions.first(where: { $0.caseInsensitiveCompare(requested) == .orderedSame }) {
-            return exact
-        }
+    func matchingAction(requested: String, record: ElementRecord) -> String? {
+        let visibleRawActions = record.role.map { meaningfulRawActions(record.rawActions, role: $0) } ?? record.rawActions
 
-        if let pretty = zip(record.rawActions, record.prettyActions).first(where: { $0.1.caseInsensitiveCompare(requested) == .orderedSame }) {
-            return pretty.0
+        for rawAction in visibleRawActions {
+            let displayName = secondaryActionDisplayName(rawAction)
+
+            if rawAction.caseInsensitiveCompare(requested) == .orderedSame ||
+                displayName.caseInsensitiveCompare(requested) == .orderedSame ||
+                secondaryActionNamesEquivalent(requested, displayName)
+            {
+                return rawAction
+            }
         }
 
         return nil
@@ -2273,7 +2296,7 @@ public final class ComputerUseService {
 
         let appReference = snapshot.app.bundleIdentifier ?? snapshot.app.name
         fputs(
-            "[open-computer-use] global pointer fallback tool=\(tool) app=\(appReference) target=\(targetDescription)\n",
+            "[open-computer-use] global input fallback tool=\(tool) app=\(appReference) target=\(targetDescription)\n",
             stderr
         )
     }

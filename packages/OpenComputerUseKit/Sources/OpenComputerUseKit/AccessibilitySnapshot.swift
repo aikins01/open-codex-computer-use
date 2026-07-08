@@ -9,6 +9,7 @@ final class ElementRecord {
     let identifier: String?
     let element: AXUIElement?
     let localFrame: CGRect?
+    let role: String?
     let rawActions: [String]
     let prettyActions: [String]
     let isSyntheticText: Bool
@@ -18,6 +19,7 @@ final class ElementRecord {
         identifier: String?,
         element: AXUIElement?,
         localFrame: CGRect?,
+        role: String? = nil,
         rawActions: [String],
         prettyActions: [String],
         isSyntheticText: Bool = false
@@ -26,6 +28,7 @@ final class ElementRecord {
         self.identifier = identifier
         self.element = element
         self.localFrame = localFrame
+        self.role = role
         self.rawActions = rawActions
         self.prettyActions = prettyActions
         self.isSyntheticText = isSyntheticText
@@ -418,6 +421,7 @@ enum SnapshotBuilder {
                 identifier: element.identifier,
                 element: nil,
                 localFrame: element.frame.cgRect,
+                role: element.role,
                 rawActions: element.actions,
                 prettyActions: element.actions
             )
@@ -864,6 +868,7 @@ private struct TreeRenderer {
             identifier: axIdentifier,
             element: root,
             localFrame: localFrame,
+            role: role,
             rawActions: actions,
             prettyActions: prettyActions
         )
@@ -1731,6 +1736,11 @@ private func roleDescription(of element: AXUIElement, role: String, subrole: Str
 }
 
 func meaningfulActions(_ values: [String], role: String) -> [String] {
+    meaningfulRawActions(values, role: role)
+        .map(secondaryActionDisplayName(_:))
+}
+
+func meaningfulRawActions(_ values: [String], role: String) -> [String] {
     values
         .filter {
             var ignored = [
@@ -1764,10 +1774,13 @@ func meaningfulActions(_ values: [String], role: String) -> [String] {
 
             return true
         }
-        .map(prettyActionName(_:))
 }
 
-private func prettyActionName(_ value: String) -> String {
+func secondaryActionDisplayName(_ value: String) -> String {
+    if let name = accessibilityActionDescriptionName(value) {
+        return name
+    }
+
     if value == "AXZoomWindow" {
         return "zoom the window"
     }
@@ -1775,6 +1788,110 @@ private func prettyActionName(_ value: String) -> String {
     let stripped = value.hasPrefix("AX") ? String(value.dropFirst(2)) : value
     let withoutPage = stripped.replacingOccurrences(of: "ByPage", with: "")
     return splitCamelCase(withoutPage)
+}
+
+func secondaryActionNamesEquivalent(_ lhs: String, _ rhs: String) -> Bool {
+    !normalizedSecondaryActionCandidates(lhs).isDisjoint(with: normalizedSecondaryActionCandidates(rhs))
+}
+
+func normalizedSecondaryActionName(_ value: String) -> String {
+    value
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+        .split(whereSeparator: { $0.isWhitespace })
+        .joined(separator: " ")
+        .lowercased()
+}
+
+func accessibilityActionDescriptionName(_ value: String) -> String? {
+    guard let nameStart = actionDescriptionValueStart(label: "name", in: value) else {
+        return nil
+    }
+
+    let nameEnd = actionDescriptionTerminatorStart(in: value, from: nameStart) ?? value.endIndex
+    let name = value[nameStart..<nameEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+    return name.isEmpty ? nil : name
+}
+
+private func actionDescriptionValueStart(label: String, in value: String) -> String.Index? {
+    var searchStart = value.startIndex
+
+    while let labelRange = value.range(of: label, options: [.caseInsensitive], range: searchStart..<value.endIndex) {
+        let beforeLabel = labelRange.lowerBound == value.startIndex ? nil : value.index(before: labelRange.lowerBound)
+        guard beforeLabel == nil || value[beforeLabel!].isWhitespace else {
+            searchStart = labelRange.upperBound
+            continue
+        }
+
+        var cursor = labelRange.upperBound
+        while cursor < value.endIndex, value[cursor].isWhitespace {
+            cursor = value.index(after: cursor)
+        }
+
+        guard cursor < value.endIndex, value[cursor] == ":" else {
+            searchStart = labelRange.upperBound
+            continue
+        }
+
+        cursor = value.index(after: cursor)
+        while cursor < value.endIndex, value[cursor].isWhitespace {
+            cursor = value.index(after: cursor)
+        }
+
+        return cursor
+    }
+
+    return nil
+}
+
+private func actionDescriptionTerminatorStart(in value: String, from start: String.Index) -> String.Index? {
+    ["target", "selector", "button clicked"]
+        .compactMap { actionDescriptionLabelStart(label: $0, in: value, from: start) }
+        .min()
+}
+
+private func actionDescriptionLabelStart(label: String, in value: String, from start: String.Index) -> String.Index? {
+    var searchStart = start
+
+    while let labelRange = value.range(of: label, options: [.caseInsensitive], range: searchStart..<value.endIndex) {
+        let beforeLabel = labelRange.lowerBound == value.startIndex ? nil : value.index(before: labelRange.lowerBound)
+        guard beforeLabel == nil || value[beforeLabel!].isWhitespace else {
+            searchStart = labelRange.upperBound
+            continue
+        }
+
+        var cursor = labelRange.upperBound
+        while cursor < value.endIndex, value[cursor].isWhitespace {
+            cursor = value.index(after: cursor)
+        }
+
+        guard cursor < value.endIndex, value[cursor] == ":" else {
+            searchStart = labelRange.upperBound
+            continue
+        }
+
+        return labelRange.lowerBound
+    }
+
+    return nil
+}
+
+private func normalizedSecondaryActionCandidates(_ value: String) -> Set<String> {
+    var candidates = Set<String>()
+    let normalized = normalizedSecondaryActionName(value)
+    if !normalized.isEmpty {
+        candidates.insert(normalized)
+    }
+
+    if let name = accessibilityActionDescriptionName(value) {
+        let normalizedName = normalizedSecondaryActionName(name)
+        if !normalizedName.isEmpty {
+            candidates.insert(normalizedName)
+        }
+    }
+
+    return candidates
 }
 
 private func humanizeAXToken(_ value: String) -> String {
