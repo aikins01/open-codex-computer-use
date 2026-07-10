@@ -88,6 +88,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
     private let dragPadView = DragPadView(frame: NSRect(x: 0, y: 0, width: 320, height: 120))
     private var scrollView: NSScrollView!
     private var counter = 0
+    private var selectedText: String?
     private weak var observedScrollView: NSScrollView?
     private var commandObserver: NSObjectProtocol?
     private let headless: Bool
@@ -286,15 +287,18 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
         switch (command.kind, command.identifier) {
         case ("set_value", "fixture-input"):
             inputField.stringValue = command.value ?? ""
+            selectedText = nil
             updateExportedState()
         case ("click", "fixture-increment"):
             handleIncrement()
         case ("click", "fixture-input"):
             window.makeFirstResponder(inputField)
+            selectedText = nil
             updateExportedState()
         case ("click", "fixture-key-capture"):
             window.makeFirstResponder(keyCaptureView)
             keyCaptureView.needsDisplay = true
+            selectedText = nil
             updateExportedState()
         case ("scroll", "fixture-scroll-view"):
             let delta = CGFloat(120 * (command.pages ?? 1))
@@ -321,15 +325,81 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
         case ("type_text", "fixture-input"):
             inputField.stringValue += command.value ?? ""
             window.makeFirstResponder(inputField)
+            selectedText = nil
+            updateExportedState()
+        case ("select_text", "fixture-input"):
+            selectTextInFixtureInput(command)
             updateExportedState()
         case ("press_key", "fixture-key-capture"):
             keyLabel.stringValue = "Last key: \(command.value ?? "unknown")"
             window.makeFirstResponder(keyCaptureView)
             keyCaptureView.needsDisplay = true
+            selectedText = nil
             updateExportedState()
         default:
             break
         }
+    }
+
+    private func selectTextInFixtureInput(_ command: FixtureCommand) {
+        let value = inputField.stringValue
+        guard let target = command.value,
+              let range = fixtureTextSelectionMatch(in: value, text: target, prefix: command.prefix, suffix: command.suffix)
+        else {
+            selectedText = nil
+            return
+        }
+
+        let mode = command.selection ?? "text"
+        let selectedRange = switch mode {
+        case "cursor_before":
+            NSRange(location: range.location, length: 0)
+        case "cursor_after":
+            NSRange(location: range.location + range.length, length: 0)
+        default:
+            range
+        }
+
+        window.makeFirstResponder(inputField)
+        if let editor = inputField.currentEditor() {
+            editor.selectedRange = selectedRange
+        }
+        selectedText = mode == "text" ? (value as NSString).substring(with: range) : nil
+    }
+
+    private func fixtureTextSelectionMatch(in value: String, text: String, prefix: String?, suffix: String?) -> NSRange? {
+        let haystack = value as NSString
+        let target = text as NSString
+        guard target.length > 0 else {
+            return nil
+        }
+
+        let prefix = prefix ?? ""
+        let suffix = suffix ?? ""
+        var searchRange = NSRange(location: 0, length: haystack.length)
+        var matchedRange: NSRange?
+
+        while searchRange.length >= target.length {
+            let found = haystack.range(of: text, options: [], range: searchRange)
+            if found.location == NSNotFound {
+                break
+            }
+
+            let afterStart = found.location + found.length
+            let before = haystack.substring(with: NSRange(location: 0, length: found.location))
+            let after = haystack.substring(with: NSRange(location: afterStart, length: haystack.length - afterStart))
+            if (prefix.isEmpty || before.hasSuffix(prefix)) && (suffix.isEmpty || after.hasPrefix(suffix)) {
+                if matchedRange != nil {
+                    return nil
+                }
+                matchedRange = found
+            }
+
+            let nextLocation = found.location + max(found.length, 1)
+            searchRange = NSRange(location: nextLocation, length: haystack.length - nextLocation)
+        }
+
+        return matchedRange
     }
 
     private func updateExportedState() {
@@ -341,6 +411,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
             windowTitle: window.title,
             windowBounds: FixtureRect(rect: windowBoundsInQuartzCoordinates()),
             focusedIdentifier: focusedIdentifier(),
+            selectedText: selectedText,
             elements: [
                 element(identifier: "fixture-window", index: 0, role: "standard window", title: window.title, value: nil, actions: ["Raise"], rect: CGRect(x: 0, y: 0, width: window.frame.width, height: window.frame.height)),
                 element(identifier: "fixture-increment", index: 1, role: "button", title: incrementButton.title, value: nil, actions: [], rect: localRect(for: incrementButton, in: contentView)),

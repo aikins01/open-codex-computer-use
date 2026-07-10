@@ -55,6 +55,30 @@ enum InputSimulation {
         Thread.sleep(forTimeInterval: 0.25)
     }
 
+    static func prepareAppForGlobalKeyboardInput(_ app: RunningAppDescriptor) throws {
+        guard PermissionDiagnostics.current().accessibilityTrusted else {
+            throw ComputerUseError.permissionDenied("Accessibility permission is required. Run `open-computer-use doctor` and grant access to Open Computer Use.")
+        }
+
+        let appName = app.name
+        let pid = app.pid
+
+        try prepareAppForGlobalKeyboardInput(appName: appName, pid: pid)
+
+        guard waitUntilFrontmost(pid: pid, timeout: 0.8) else {
+            throw ComputerUseError.stateUnavailable("Failed to make \(appName) frontmost before keyboard input")
+        }
+    }
+
+    private static func prepareAppForGlobalKeyboardInput(appName: String, pid: pid_t) throws {
+        guard let runningApplication = NSRunningApplication(processIdentifier: pid) else {
+            throw ComputerUseError.stateUnavailable("\(appName) is no longer running")
+        }
+
+        _ = runningApplication.activate(options: [.activateAllWindows])
+        _ = raiseAppWindowViaAccessibility(pid: pid)
+    }
+
     static func clickGlobally(at point: CGPoint, button: MouseButtonKind, clickCount: Int) throws {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw ComputerUseError.message("Failed to create HID event source.")
@@ -221,6 +245,60 @@ enum InputSimulation {
         Thread.sleep(forTimeInterval: 0.1)
     }
 
+    static func pressKeyGlobally(_ specification: String) throws {
+        let parsed = try KeyPressParser.parse(specification)
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
+            throw ComputerUseError.message("Failed to create HID event source.")
+        }
+
+        var activeFlags: CGEventFlags = []
+        var modifierDownEvents: [CGEvent] = []
+
+        for modifier in parsed.modifiers {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: modifier.keyCode, keyDown: true) else {
+                throw ComputerUseError.message("Failed to create modifier key down event.")
+            }
+
+            activeFlags.insert(modifier.flag)
+            event.flags = activeFlags
+            event.type = .flagsChanged
+            modifierDownEvents.append(event)
+        }
+
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: parsed.keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: parsed.keyCode, keyDown: false) else {
+            throw ComputerUseError.message("Failed to create key event.")
+        }
+
+        keyDown.flags = activeFlags
+        keyUp.flags = activeFlags
+
+        var modifierUpEvents: [CGEvent] = []
+        for modifier in parsed.modifiers.reversed() {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: modifier.keyCode, keyDown: false) else {
+                throw ComputerUseError.message("Failed to create modifier key up event.")
+            }
+
+            activeFlags.remove(modifier.flag)
+            event.flags = activeFlags
+            event.type = .flagsChanged
+            modifierUpEvents.append(event)
+        }
+
+        for event in modifierDownEvents {
+            event.post(tap: .cghidEventTap)
+        }
+
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+
+        for event in modifierUpEvents {
+            event.post(tap: .cghidEventTap)
+        }
+
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+
     private static func postMouseEvent(type: CGEventType, source: CGEventSource, point: CGPoint, button: CGMouseButton, clickState: Int) throws {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
             throw ComputerUseError.message("Failed to create mouse event \(type.rawValue).")
@@ -260,6 +338,29 @@ enum InputSimulation {
         }
 
         return false
+    }
+
+    private static func waitUntilFrontmost(pid: pid_t, timeout: TimeInterval) -> Bool {
+        if Thread.isMainThread {
+            return DispatchQueue.global(qos: .userInitiated).sync {
+                waitUntilActive(pid: pid, timeout: timeout)
+            }
+        }
+
+        return waitUntilActive(pid: pid, timeout: timeout)
+    }
+
+    private static func waitUntilActive(pid: pid_t, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if NSRunningApplication(processIdentifier: pid)?.isActive == true {
+                return true
+            }
+
+            Thread.sleep(forTimeInterval: 0.03)
+        }
+
+        return NSRunningApplication(processIdentifier: pid)?.isActive == true
     }
 
     private static func preferredWindow(for appElement: AXUIElement) -> AXUIElement? {

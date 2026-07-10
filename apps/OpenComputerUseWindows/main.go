@@ -22,7 +22,18 @@ var version = "0.1.54"
 //go:embed runtime.ps1
 var windowsRuntimeScript string
 
-const serverInstructions = "Computer Use tools let you interact with Windows apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Windows actions use UI Automation patterns first and fall back to window messages when an app does not expose the needed pattern. The Windows runtime does not auto-launch apps, perform SetFocus, or use UIA text fallback by default, so background-capable actions do not intentionally steal the user's foreground focus."
+const serverInstructions = "Computer Use tools let you interact with Windows apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, select_text, drag, type_text, press_key, and set_value.\n\nAfter each action, call `get_app_state` to fetch the latest state before deciding the next UI action.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Windows actions use UI Automation patterns first and fall back to window messages when an app does not expose the needed pattern. The Windows runtime does not auto-launch apps, perform SetFocus, use UIA text fallback, or perform UIA text selection by default, so background-capable actions do not intentionally steal the user's foreground focus."
+
+const appStateNoChangeMessage = "There has been no change"
+const actionCompletedMessage = "Action completed. Call `get_app_state` to fetch the updated UI state."
+
+const appStateDiffHeader = `The following is a diff from the previous accessibility tree
+with ~, +, and - representing changed, added, and removed elements, respectively.`
+
+const appStateDiffMaxLines = 240
+const appStateDiffMaxCharacters = 20000
+const appStateDiffLineCharacterLimit = 600
+const appStateDiffMaxComparableCells = 1000000
 
 type toolDefinition struct {
 	Name        string         `json:"name"`
@@ -45,6 +56,28 @@ type toolCallResult struct {
 
 func textResult(text string, isError bool) toolCallResult {
 	return toolCallResult{Content: []contentItem{{Type: "text", Text: text}}, IsError: isError}
+}
+
+type appStateOutputOptions struct {
+	IncludeImage bool
+	ForceImage   bool
+	MaxTextChars *int
+	OnlyChanges  bool
+}
+
+type appStateOutputCache struct {
+	RenderedText                    string
+	ScreenshotPNGBase64             string
+	ImageIncluded                   bool
+	LastIncludedScreenshotPNGBase64 string
+}
+
+func (c appStateOutputCache) sameSnapshot(other appStateOutputCache) bool {
+	return c.RenderedText == other.RenderedText && c.ScreenshotPNGBase64 == other.ScreenshotPNGBase64
+}
+
+func defaultAppStateOutputOptions() appStateOutputOptions {
+	return appStateOutputOptions{IncludeImage: true}
 }
 
 type appDescriptor struct {
@@ -115,18 +148,196 @@ func (s *appSnapshot) renderedText() string {
 	return strings.Join(lines, "\n")
 }
 
-func (s *appSnapshot) result() toolCallResult {
-	result := toolCallResult{
-		Content: []contentItem{{Type: "text", Text: s.renderedText()}},
+func (s *appSnapshot) appStateResult(options appStateOutputOptions, previous *appStateOutputCache) (toolCallResult, appStateOutputCache) {
+	renderedText := s.renderedText()
+	screenshot := ""
+	if s != nil {
+		screenshot = s.ScreenshotPNGBase64
 	}
-	if s != nil && s.ScreenshotPNGBase64 != "" {
+	current := appStateOutputCache{RenderedText: renderedText, ScreenshotPNGBase64: screenshot}
+	if previous != nil {
+		current.LastIncludedScreenshotPNGBase64 = previous.LastIncludedScreenshotPNGBase64
+	}
+	accessibilityUnchanged := options.OnlyChanges && previous != nil && previous.RenderedText == renderedText
+	text := limitedAppStateText(renderedText, options.MaxTextChars)
+	if options.OnlyChanges && previous != nil {
+		text = appStateChangeText(previous.RenderedText, renderedText, options.MaxTextChars)
+	}
+
+	result := toolCallResult{
+		Content: []contentItem{{Type: "text", Text: text}},
+	}
+	callerHasImage := current.LastIncludedScreenshotPNGBase64 != ""
+	callerHasCurrentImage := current.LastIncludedScreenshotPNGBase64 == screenshot
+	if options.IncludeImage && screenshot != "" && (options.ForceImage || !callerHasImage || (!accessibilityUnchanged && !callerHasCurrentImage)) {
 		result.Content = append(result.Content, contentItem{
 			Type:     "image",
-			Data:     s.ScreenshotPNGBase64,
+			Data:     screenshot,
 			MimeType: "image/png",
 		})
+		current.ImageIncluded = true
+		current.LastIncludedScreenshotPNGBase64 = screenshot
 	}
-	return result
+	return result, current
+}
+
+func limitedAppStateText(text string, maxChars *int) string {
+	if maxChars == nil || *maxChars == 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= *maxChars {
+		return text
+	}
+	suffix := fmt.Sprintf("\n\n[truncated after %d characters]", *maxChars)
+	suffixRunes := []rune(suffix)
+	if *maxChars <= len(suffixRunes) {
+		return string(runes[:*maxChars])
+	}
+	return string(runes[:*maxChars-len(suffixRunes)]) + suffix
+}
+
+func appStateChangeText(previous string, current string, maxChars *int) string {
+	if previous == current {
+		return appStateNoChangeMessage
+	}
+	diff := appStateDiffText(previous, current)
+	if maxChars != nil {
+		return limitedAppStateText(diff, maxChars)
+	}
+	defaultMaxChars := appStateDiffMaxCharacters
+	return limitedAppStateText(diff, &defaultMaxChars)
+}
+
+func appStateDiffText(previous string, current string) string {
+	previousLines := strings.Split(previous, "\n")
+	currentLines := strings.Split(current, "\n")
+	if len(previousLines) > 0 && len(currentLines) > appStateDiffMaxComparableCells/len(previousLines) {
+		return strings.Join(append([]string{appStateDiffHeader, "[line diff omitted because the accessibility trees are too large]"}, appStateCurrentTreePreviewLines(currentLines)...), "\n")
+	}
+	operations := appStateDiffOperations(previousLines, currentLines)
+	lines := appStateFormattedDiffLines(operations)
+	return strings.Join(append([]string{appStateDiffHeader}, lines...), "\n")
+}
+
+func appStateCurrentTreePreviewLines(lines []string) []string {
+	limit := min(len(lines), appStateDiffMaxLines)
+	preview := make([]string, 0, limit+1)
+	for _, line := range lines[:limit] {
+		preview = append(preview, "+ "+limitedAppStateDiffLine(line))
+	}
+	if len(lines) > appStateDiffMaxLines {
+		preview = append(preview, fmt.Sprintf("[diff truncated after %d changed lines]", appStateDiffMaxLines))
+	}
+	return preview
+}
+
+type appStateDiffOperation struct {
+	prefix string
+	line   string
+}
+
+func appStateDiffOperations(previousLines []string, currentLines []string) []appStateDiffOperation {
+	width := len(currentLines) + 1
+	table := make([]int, (len(previousLines)+1)*width)
+	tableIndex := func(previousIndex int, currentIndex int) int {
+		return previousIndex*width + currentIndex
+	}
+
+	for previousIndex := 1; previousIndex <= len(previousLines); previousIndex++ {
+		for currentIndex := 1; currentIndex <= len(currentLines); currentIndex++ {
+			if previousLines[previousIndex-1] == currentLines[currentIndex-1] {
+				table[tableIndex(previousIndex, currentIndex)] = table[tableIndex(previousIndex-1, currentIndex-1)] + 1
+			} else if table[tableIndex(previousIndex-1, currentIndex)] > table[tableIndex(previousIndex, currentIndex-1)] {
+				table[tableIndex(previousIndex, currentIndex)] = table[tableIndex(previousIndex-1, currentIndex)]
+			} else {
+				table[tableIndex(previousIndex, currentIndex)] = table[tableIndex(previousIndex, currentIndex-1)]
+			}
+		}
+	}
+
+	previousIndex := len(previousLines)
+	currentIndex := len(currentLines)
+	reversed := make([]appStateDiffOperation, 0)
+	for previousIndex > 0 || currentIndex > 0 {
+		if previousIndex > 0 && currentIndex > 0 && previousLines[previousIndex-1] == currentLines[currentIndex-1] {
+			previousIndex--
+			currentIndex--
+		} else if currentIndex > 0 && (previousIndex == 0 || table[tableIndex(previousIndex, currentIndex-1)] >= table[tableIndex(previousIndex-1, currentIndex)]) {
+			reversed = append(reversed, appStateDiffOperation{prefix: "+", line: currentLines[currentIndex-1]})
+			currentIndex--
+		} else {
+			reversed = append(reversed, appStateDiffOperation{prefix: "-", line: previousLines[previousIndex-1]})
+			previousIndex--
+		}
+	}
+
+	operations := make([]appStateDiffOperation, len(reversed))
+	for i := range reversed {
+		operations[len(reversed)-1-i] = reversed[i]
+	}
+	return operations
+}
+
+func appStateFormattedDiffLines(operations []appStateDiffOperation) []string {
+	lines := make([]string, 0)
+	operationIndex := 0
+	truncated := false
+	appendLine := func(line string) {
+		if len(lines) >= appStateDiffMaxLines {
+			truncated = true
+			return
+		}
+		lines = append(lines, line)
+	}
+
+	for operationIndex < len(operations) && !truncated {
+		if operations[operationIndex].prefix == "-" {
+			removals := make([]string, 0)
+			for operationIndex < len(operations) && operations[operationIndex].prefix == "-" {
+				removals = append(removals, operations[operationIndex].line)
+				operationIndex++
+			}
+			additions := make([]string, 0)
+			for operationIndex < len(operations) && operations[operationIndex].prefix == "+" {
+				additions = append(additions, operations[operationIndex].line)
+				operationIndex++
+			}
+			for index := 0; index < max(len(removals), len(additions)); index++ {
+				if index < len(removals) && index < len(additions) {
+					appendLine("~ " + limitedAppStateDiffLine(removals[index]) + " -> " + limitedAppStateDiffLine(additions[index]))
+				} else if index < len(removals) {
+					appendLine("- " + limitedAppStateDiffLine(removals[index]))
+				} else {
+					appendLine("+ " + limitedAppStateDiffLine(additions[index]))
+				}
+			}
+		} else {
+			appendLine("+ " + limitedAppStateDiffLine(operations[operationIndex].line))
+			operationIndex++
+		}
+	}
+
+	if len(lines) == 0 {
+		lines = append(lines, "[accessibility tree changed, but no line-level diff was produced]")
+	}
+	if truncated {
+		lines = append(lines, fmt.Sprintf("[diff truncated after %d changed lines]", appStateDiffMaxLines))
+	}
+	return lines
+}
+
+func limitedAppStateDiffLine(line string) string {
+	runes := []rune(line)
+	if len(runes) <= appStateDiffLineCharacterLimit {
+		return line
+	}
+	suffix := " ... [line truncated]"
+	suffixRunes := []rune(suffix)
+	if appStateDiffLineCharacterLimit <= len(suffixRunes) {
+		return string(runes[:appStateDiffLineCharacterLimit])
+	}
+	return string(runes[:appStateDiffLineCharacterLimit-len(suffixRunes)]) + suffix
 }
 
 type psRequest struct {
@@ -145,6 +356,9 @@ type psRequest struct {
 	Direction    string         `json:"direction,omitempty"`
 	Pages        float64        `json:"pages,omitempty"`
 	Text         string         `json:"text,omitempty"`
+	Prefix       string         `json:"prefix,omitempty"`
+	Suffix       string         `json:"suffix,omitempty"`
+	Selection    string         `json:"selection,omitempty"`
 	Key          string         `json:"key,omitempty"`
 	Value        string         `json:"value,omitempty"`
 	WindowBounds *frame         `json:"windowBounds,omitempty"`
@@ -159,11 +373,17 @@ type psResponse struct {
 }
 
 type service struct {
-	snapshots map[string]*appSnapshot
+	snapshots       map[string]*appSnapshot
+	appStateOutputs map[string]appStateOutputCache
 }
 
 func newService() *service {
-	return &service{snapshots: map[string]*appSnapshot{}}
+	return &service{snapshots: map[string]*appSnapshot{}, appStateOutputs: map[string]appStateOutputCache{}}
+}
+
+func (s *service) resetTurnState() {
+	clear(s.snapshots)
+	clear(s.appStateOutputs)
 }
 
 func (s *service) callTool(name string, args map[string]any) toolCallResult {
@@ -171,7 +391,11 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 	case "list_apps":
 		return s.listApps()
 	case "get_app_state":
-		return s.getAppState(requiredString(args, "app"), optionalBool(args, "show_full_text"))
+		options, errText := appStateOutputOptionsFromArgs(args)
+		if errText != "" {
+			return textResult(errText, true)
+		}
+		return s.getAppState(requiredString(args, "app"), optionalBool(args, "show_full_text"), options)
 	case "click":
 		return s.click(
 			requiredString(args, "app"),
@@ -193,6 +417,15 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 			requiredString(args, "direction"),
 			requiredElementIndex(args),
 			floatValue(optionalFloat(args, "pages"), 1),
+		)
+	case "select_text":
+		return s.selectText(
+			requiredString(args, "app"),
+			requiredElementIndex(args),
+			requiredString(args, "text"),
+			optionalString(args, "prefix"),
+			optionalString(args, "suffix"),
+			defaultString(optionalString(args, "selection"), "text"),
 		)
 	case "drag":
 		return s.drag(
@@ -227,7 +460,7 @@ func (s *service) listApps() toolCallResult {
 	return textResult(response.Text, false)
 }
 
-func (s *service) getAppState(app string, showFullText bool) toolCallResult {
+func (s *service) getAppState(app string, showFullText bool, outputOptions appStateOutputOptions) toolCallResult {
 	if app == "" {
 		return textResult("Missing required argument: app", true)
 	}
@@ -235,7 +468,13 @@ func (s *service) getAppState(app string, showFullText bool) toolCallResult {
 	if result.IsError {
 		return result
 	}
-	return snapshot.result()
+	keys := appStateCacheKeys(app, snapshot)
+	previous := s.previousAppStateOutput(keys)
+	result, current := snapshot.appStateResult(outputOptions, previous)
+	for _, key := range keys {
+		s.appStateOutputs[key] = current
+	}
+	return result
 }
 
 func (s *service) click(app, elementIndex string, x, y *float64, clickCount int, mouseButton string) toolCallResult {
@@ -314,6 +553,33 @@ func (s *service) scroll(app, direction, elementIndex string, pages float64) too
 	return s.actionResult(app, psRequest{Tool: "scroll", App: app, Element: record, Direction: normalized, Pages: pages})
 }
 
+func (s *service) selectText(app, elementIndex, text, prefix, suffix, selection string) toolCallResult {
+	if app == "" {
+		return textResult("Missing required argument: app", true)
+	}
+	if elementIndex == "" {
+		return textResult("Missing required argument: element_index", true)
+	}
+	if text == "" {
+		return textResult("Missing required argument: text", true)
+	}
+	if selection != "text" && selection != "cursor_before" && selection != "cursor_after" {
+		return textResult("Invalid selection: "+selection, true)
+	}
+	if !envFlagEnabled("OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_SELECTION") {
+		return textResult("UIA TextPattern selection is disabled by default because it may bring the target app to the foreground; set OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_SELECTION=1 to enable it.", true)
+	}
+	snapshot := s.currentSnapshot(app)
+	if snapshot == nil {
+		return textResult("No app state is available for "+app+". Run get_app_state before action tools.", true)
+	}
+	record, err := lookupElement(snapshot, elementIndex)
+	if err != nil {
+		return textResult(err.Error(), true)
+	}
+	return s.actionResult(app, psRequest{Tool: "select_text", App: app, Element: record, Text: text, Prefix: prefix, Suffix: suffix, Selection: selection})
+}
+
 func (s *service) drag(app string, fromX, fromY, toX, toY *float64) toolCallResult {
 	if app == "" {
 		return textResult("Missing required argument: app", true)
@@ -382,11 +648,11 @@ func (s *service) setValue(app, elementIndex, value string) toolCallResult {
 }
 
 func (s *service) actionResult(app string, request psRequest) toolCallResult {
-	snapshot, result := s.refreshSnapshot(app, request)
+	_, result := s.refreshSnapshot(app, request)
 	if result.IsError {
 		return result
 	}
-	return snapshot.result()
+	return textResult(actionCompletedMessage, false)
 }
 
 func (s *service) currentSnapshot(app string) *appSnapshot {
@@ -550,6 +816,97 @@ func optionalBool(args map[string]any, key string) bool {
 	return value
 }
 
+func appStateOutputOptionsFromArgs(args map[string]any) (appStateOutputOptions, string) {
+	options := defaultAppStateOutputOptions()
+	if value, ok := args["include_image"].(bool); ok {
+		options.IncludeImage = value
+	}
+	if value, ok := args["force_image"].(bool); ok {
+		options.ForceImage = value
+	}
+	if value, ok := args["only_changes"].(bool); ok {
+		options.OnlyChanges = value
+	}
+	maxTextChars, ok := optionalNonNegativeInt(args, "max_text_chars")
+	if !ok {
+		return options, "max_text_chars must be a non-negative integer"
+	}
+	options.MaxTextChars = maxTextChars
+	return options, ""
+}
+
+func optionalNonNegativeInt(args map[string]any, key string) (*int, bool) {
+	value, exists := args[key]
+	if !exists || value == nil {
+		return nil, true
+	}
+
+	switch value := value.(type) {
+	case json.Number:
+		integer, err := value.Int64()
+		if err != nil || integer < 0 || int64(int(integer)) != integer {
+			return nil, false
+		}
+		result := int(integer)
+		return &result, true
+	case float64:
+		return nonNegativeIntFloat(value)
+	case int:
+		if value < 0 {
+			return nil, false
+		}
+		result := value
+		return &result, true
+	case int64:
+		if value < 0 || int64(int(value)) != value {
+			return nil, false
+		}
+		result := int(value)
+		return &result, true
+	}
+
+	return nil, false
+}
+
+func nonNegativeIntFloat(value float64) (*int, bool) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || value < 0 || value > float64(int(^uint(0)>>1)) {
+		return nil, false
+	}
+	result := int(value)
+	return &result, true
+}
+
+func appStateCacheKeys(query string, snapshot *appSnapshot) []string {
+	seen := map[string]bool{}
+	keys := []string{}
+	rawKeys := []string{query}
+	if snapshot != nil {
+		rawKeys = append(rawKeys, snapshot.App.Name, snapshot.App.BundleIdentifier)
+	}
+	for _, key := range rawKeys {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if normalized != "" && !seen[normalized] {
+			seen[normalized] = true
+			keys = append(keys, normalized)
+		}
+	}
+	return keys
+}
+
+func (s *service) previousAppStateOutput(keys []string) *appStateOutputCache {
+	for _, key := range keys {
+		if previous, ok := s.appStateOutputs[key]; ok {
+			return &previous
+		}
+	}
+	return nil
+}
+
+func envFlagEnabled(name string) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes") || strings.EqualFold(value, "on")
+}
+
 func intValue(value *float64, fallback int) int {
 	if value == nil {
 		return fallback
@@ -605,6 +962,10 @@ func toolDefinitions() []toolDefinition {
 			InputSchema: objectSchema(map[string]any{
 				"app":            stringProperty("App name or bundle identifier"),
 				"show_full_text": booleanProperty("Return full accessibility text without the default 500 character truncation. Defaults to false."),
+				"include_image":  booleanProperty("Return a screenshot image block when one is available. Defaults to true."),
+				"force_image":    booleanProperty("Return the screenshot even when it matches the previous app state for this app. Defaults to false."),
+				"max_text_chars": integerProperty("Maximum characters to return from the rendered accessibility text. Set 0 for no post-render cap.", 0),
+				"only_changes":   booleanProperty("Return only accessibility-tree changes after the previous get_app_state result for this app: a no-change message when stable or a compact diff when changed. Defaults to false."),
 			}, []string{"app"}),
 		},
 		{
@@ -642,6 +1003,19 @@ func toolDefinitions() []toolDefinition {
 				"element_index": stringProperty("Element identifier"),
 				"pages":         numberProperty("Number of pages to scroll. Fractional values are supported. Defaults to 1"),
 			}, []string{"app", "element_index", "direction"}),
+		},
+		{
+			Name:        "select_text",
+			Description: "Select text inside a text element, or place the text cursor before or after it. Provide text exactly as it appears in the accessibility tree, including any Markdown formatting. If the text is not unique, provide surrounding prefix or suffix text to disambiguate it.",
+			Annotations: defaultAnnotations(),
+			InputSchema: objectSchema(map[string]any{
+				"app":           stringProperty("App name or bundle identifier"),
+				"element_index": stringProperty("Text element identifier"),
+				"text":          stringProperty("Target text as shown in the accessibility tree"),
+				"prefix":        stringProperty("Optional text immediately before the target, used to disambiguate repeated matches"),
+				"suffix":        stringProperty("Optional text immediately after the target, used to disambiguate repeated matches"),
+				"selection":     enumStringProperty("Whether to select the text or place the cursor before or after it. Defaults to text.", []string{"text", "cursor_before", "cursor_after"}),
+			}, []string{"app", "element_index", "text"}),
 		},
 		{
 			Name:        "set_value",
@@ -703,8 +1077,12 @@ func numberProperty(description string) map[string]any {
 	return map[string]any{"type": "number", "description": description}
 }
 
-func integerProperty(description string) map[string]any {
-	return map[string]any{"type": "integer", "description": description}
+func integerProperty(description string, minimum ...int) map[string]any {
+	property := map[string]any{"type": "integer", "description": description}
+	if len(minimum) > 0 {
+		property["minimum"] = minimum[0]
+	}
+	return property
 }
 
 func main() {
@@ -989,7 +1367,10 @@ func handleMCPRequest(request map[string]any, svc *service) map[string]any {
 			"capabilities": map[string]any{"tools": map[string]any{"listChanged": false}},
 			"instructions": serverInstructions,
 		})
-	case "notifications/initialized", "notifications/turn-ended":
+	case "notifications/initialized":
+		return nil
+	case "notifications/turn-ended":
+		svc.resetTurnState()
 		return nil
 	case "ping":
 		return jsonRPCResult(id, map[string]any{})

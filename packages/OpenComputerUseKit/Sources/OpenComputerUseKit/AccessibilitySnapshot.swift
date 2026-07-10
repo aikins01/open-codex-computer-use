@@ -9,6 +9,7 @@ final class ElementRecord {
     let identifier: String?
     let element: AXUIElement?
     let localFrame: CGRect?
+    let role: String?
     let rawActions: [String]
     let prettyActions: [String]
     let isSyntheticText: Bool
@@ -18,6 +19,7 @@ final class ElementRecord {
         identifier: String?,
         element: AXUIElement?,
         localFrame: CGRect?,
+        role: String? = nil,
         rawActions: [String],
         prettyActions: [String],
         isSyntheticText: Bool = false
@@ -26,6 +28,7 @@ final class ElementRecord {
         self.identifier = identifier
         self.element = element
         self.localFrame = localFrame
+        self.role = role
         self.rawActions = rawActions
         self.prettyActions = prettyActions
         self.isSyntheticText = isSyntheticText
@@ -39,15 +42,109 @@ enum SnapshotMode {
 
 let accessibilityTreeMaxNodeCount = 1200
 let accessibilityTreeMaxDepth = 64
-let screenshotCaptureTimeout: TimeInterval = 5
-let screenshotResultMaxPNGBytes = 900_000
-let screenshotResultMaxDimension: CGFloat = 1280
-let screenshotResultMinScale: CGFloat = 0.25
 let snapshotTextDefaultCharacterLimit = 500
 private let windowVisibilityRecoveryDelay: TimeInterval = 0.7
 private let axWebAreaRole = "AXWebArea"
 private let axContentsAttribute = "AXContents"
 private let axVisibleChildrenAttribute = "AXVisibleChildren"
+
+struct ImageCaptureConfig: Sendable, Equatable {
+    let captureTimeout: TimeInterval
+    let maxPNGBytes: Int
+    let maxDimension: Int
+    let minScale: CGFloat
+
+    static let defaults = ImageCaptureConfig(
+        captureTimeout: 5,
+        maxPNGBytes: 900_000,
+        maxDimension: 1280,
+        minScale: 0.25
+    )
+
+    static let current = ImageCaptureConfig.fromEnvironment()
+
+    static func fromEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> ImageCaptureConfig {
+        let minScale = imageConfigValue(
+            name: "OPEN_COMPUTER_USE_IMAGE_MIN_SCALE",
+            raw: environment["OPEN_COMPUTER_USE_IMAGE_MIN_SCALE"],
+            defaultValue: Double(defaults.minScale),
+            parse: parseImageConfigUnitInterval
+        )
+
+        return ImageCaptureConfig(
+            captureTimeout: imageConfigValue(
+                name: "OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT",
+                raw: environment["OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT"],
+                defaultValue: defaults.captureTimeout,
+                parse: parseImageConfigPositiveDouble
+            ),
+            maxPNGBytes: imageConfigValue(
+                name: "OPEN_COMPUTER_USE_IMAGE_MAX_BYTES",
+                raw: environment["OPEN_COMPUTER_USE_IMAGE_MAX_BYTES"],
+                defaultValue: defaults.maxPNGBytes,
+                parse: parseImageConfigPositiveInt
+            ),
+            maxDimension: imageConfigValue(
+                name: "OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION",
+                raw: environment["OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION"],
+                defaultValue: defaults.maxDimension,
+                parse: parseImageConfigPositiveInt
+            ),
+            minScale: CGFloat(minScale)
+        )
+    }
+}
+
+private func imageConfigValue<T>(name: String, raw: String?, defaultValue: T, parse: (String?) -> T?) -> T {
+    if let value = parse(raw) {
+        return value
+    }
+
+    if raw?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+        fputs("[open-computer-use] Ignoring invalid \(name); using default.\n", stderr)
+    }
+
+    return defaultValue
+}
+
+private func parseImageConfigPositiveInt(_ raw: String?) -> Int? {
+    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !raw.isEmpty,
+          let value = Int(raw),
+          value > 0
+    else {
+        return nil
+    }
+
+    return value
+}
+
+private func parseImageConfigPositiveDouble(_ raw: String?) -> Double? {
+    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !raw.isEmpty,
+          let value = Double(raw),
+          value > 0,
+          value.isFinite
+    else {
+        return nil
+    }
+
+    return value
+}
+
+private func parseImageConfigUnitInterval(_ raw: String?) -> Double? {
+    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !raw.isEmpty,
+          let value = Double(raw),
+          value > 0,
+          value <= 1,
+          value.isFinite
+    else {
+        return nil
+    }
+
+    return value
+}
 
 public struct AppSnapshot {
     public let app: RunningAppDescriptor
@@ -57,6 +154,7 @@ public struct AppSnapshot {
     let targetWindowLayer: Int?
     public let screenshotPNGData: Data?
     let mode: SnapshotMode
+    let showFullText: Bool
     let treeLines: [String]
     let focusedSummary: String?
     let focusedElement: AXUIElement?
@@ -185,6 +283,7 @@ enum SnapshotBuilder {
             targetWindowLayer: windowCapture.layer,
             screenshotPNGData: screenshotPNGData,
             mode: .accessibility,
+            showFullText: showFullText,
             treeLines: renderer.lines,
             focusedSummary: renderer.focusedSummary,
             focusedElement: focusedElement,
@@ -322,6 +421,7 @@ enum SnapshotBuilder {
                 identifier: element.identifier,
                 element: nil,
                 localFrame: element.frame.cgRect,
+                role: element.role,
                 rawActions: element.actions,
                 prettyActions: element.actions
             )
@@ -340,10 +440,11 @@ enum SnapshotBuilder {
             targetWindowLayer: nil,
             screenshotPNGData: nil,
             mode: .fixture,
+            showFullText: false,
             treeLines: lines,
             focusedSummary: focusedSummary,
             focusedElement: nil,
-            selectedText: nil,
+            selectedText: state.selectedText,
             elements: records
         )
     }
@@ -362,6 +463,7 @@ private struct WindowCapture {
     let layer: Int
     let bounds: CGRect
     let image: CGImage?
+    let imageConfig: ImageCaptureConfig
 
     static func resolve(for pid: pid_t, titleHint: String?) -> WindowCapture? {
         guard let infoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
@@ -396,13 +498,14 @@ private struct WindowCapture {
             return nil
         }
 
-        let image = captureImage(windowID: best.windowID, bounds: best.bounds)
+        let imageConfig = ImageCaptureConfig.current
+        let image = captureImage(windowID: best.windowID, bounds: best.bounds, config: imageConfig)
 
-        return WindowCapture(windowID: best.windowID, layer: best.layer, bounds: best.bounds, image: image)
+        return WindowCapture(windowID: best.windowID, layer: best.layer, bounds: best.bounds, image: image, imageConfig: imageConfig)
     }
 
-    private static func captureImage(windowID: CGWindowID, bounds: CGRect) -> CGImage? {
-        try? BlockingAsyncBridge.run(timeout: screenshotCaptureTimeout) {
+    private static func captureImage(windowID: CGWindowID, bounds: CGRect, config: ImageCaptureConfig) -> CGImage? {
+        try? BlockingAsyncBridge.run(timeout: config.captureTimeout) {
             let shareableContent = try await SCShareableContent.current
             guard let window = shareableContent.windows.first(where: { $0.windowID == windowID }) else {
                 return nil
@@ -433,7 +536,12 @@ private struct WindowCapture {
             return nil
         }
 
-        return boundedScreenshotPNGData(for: image)
+        return boundedScreenshotPNGData(
+            for: image,
+            maxBytes: imageConfig.maxPNGBytes,
+            maxDimension: CGFloat(imageConfig.maxDimension),
+            minScale: imageConfig.minScale
+        )
     }
 }
 
@@ -480,24 +588,34 @@ func preferredWindowCaptureCandidate(_ candidates: [WindowCaptureCandidate], tit
 
 func boundedScreenshotPNGData(
     for image: CGImage,
-    maxBytes: Int = screenshotResultMaxPNGBytes,
-    maxDimension: CGFloat = screenshotResultMaxDimension,
-    minScale: CGFloat = screenshotResultMinScale
+    maxBytes: Int = ImageCaptureConfig.defaults.maxPNGBytes,
+    maxDimension: CGFloat = CGFloat(ImageCaptureConfig.defaults.maxDimension),
+    minScale: CGFloat = ImageCaptureConfig.defaults.minScale
 ) -> Data? {
-    guard image.width > 0, image.height > 0, maxBytes > 0 else {
+    guard image.width > 0,
+          image.height > 0,
+          maxBytes > 0,
+          maxDimension >= 1,
+          maxDimension.isFinite,
+          maxDimension.rounded(.down) == maxDimension,
+          minScale > 0,
+          minScale <= 1,
+          minScale.isFinite
+    else {
         return nil
     }
 
     let original = pngData(for: image)
     let largestDimension = CGFloat(max(image.width, image.height))
     var scale = min(1, maxDimension / largestDimension)
+    let byteBudgetFloorScale = scale * minScale
 
     if scale >= 1, let original, original.count <= maxBytes {
         return original
     }
 
     var best = original
-    while scale >= minScale {
+    while scale >= byteBudgetFloorScale {
         guard let resized = resizedCGImage(image, scale: scale),
               let data = pngData(for: resized)
         else {
@@ -521,8 +639,8 @@ private func pngData(for image: CGImage) -> Data? {
 }
 
 private func resizedCGImage(_ image: CGImage, scale: CGFloat) -> CGImage? {
-    let width = max(1, Int((CGFloat(image.width) * scale).rounded()))
-    let height = max(1, Int((CGFloat(image.height) * scale).rounded()))
+    let width = max(1, Int((CGFloat(image.width) * scale).rounded(.down)))
+    let height = max(1, Int((CGFloat(image.height) * scale).rounded(.down)))
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
 
@@ -750,6 +868,7 @@ private struct TreeRenderer {
             identifier: axIdentifier,
             element: root,
             localFrame: localFrame,
+            role: role,
             rawActions: actions,
             prettyActions: prettyActions
         )
@@ -1617,6 +1736,11 @@ private func roleDescription(of element: AXUIElement, role: String, subrole: Str
 }
 
 func meaningfulActions(_ values: [String], role: String) -> [String] {
+    meaningfulRawActions(values, role: role)
+        .map(secondaryActionDisplayName(_:))
+}
+
+func meaningfulRawActions(_ values: [String], role: String) -> [String] {
     values
         .filter {
             var ignored = [
@@ -1650,10 +1774,13 @@ func meaningfulActions(_ values: [String], role: String) -> [String] {
 
             return true
         }
-        .map(prettyActionName(_:))
 }
 
-private func prettyActionName(_ value: String) -> String {
+func secondaryActionDisplayName(_ value: String) -> String {
+    if let name = accessibilityActionDescriptionName(value) {
+        return name
+    }
+
     if value == "AXZoomWindow" {
         return "zoom the window"
     }
@@ -1661,6 +1788,110 @@ private func prettyActionName(_ value: String) -> String {
     let stripped = value.hasPrefix("AX") ? String(value.dropFirst(2)) : value
     let withoutPage = stripped.replacingOccurrences(of: "ByPage", with: "")
     return splitCamelCase(withoutPage)
+}
+
+func secondaryActionNamesEquivalent(_ lhs: String, _ rhs: String) -> Bool {
+    !normalizedSecondaryActionCandidates(lhs).isDisjoint(with: normalizedSecondaryActionCandidates(rhs))
+}
+
+func normalizedSecondaryActionName(_ value: String) -> String {
+    value
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+        .split(whereSeparator: { $0.isWhitespace })
+        .joined(separator: " ")
+        .lowercased()
+}
+
+func accessibilityActionDescriptionName(_ value: String) -> String? {
+    guard let nameStart = actionDescriptionValueStart(label: "name", in: value) else {
+        return nil
+    }
+
+    let nameEnd = actionDescriptionTerminatorStart(in: value, from: nameStart) ?? value.endIndex
+    let name = value[nameStart..<nameEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+    return name.isEmpty ? nil : name
+}
+
+private func actionDescriptionValueStart(label: String, in value: String) -> String.Index? {
+    var searchStart = value.startIndex
+
+    while let labelRange = value.range(of: label, options: [.caseInsensitive], range: searchStart..<value.endIndex) {
+        let beforeLabel = labelRange.lowerBound == value.startIndex ? nil : value.index(before: labelRange.lowerBound)
+        guard beforeLabel == nil || value[beforeLabel!].isWhitespace else {
+            searchStart = labelRange.upperBound
+            continue
+        }
+
+        var cursor = labelRange.upperBound
+        while cursor < value.endIndex, value[cursor].isWhitespace {
+            cursor = value.index(after: cursor)
+        }
+
+        guard cursor < value.endIndex, value[cursor] == ":" else {
+            searchStart = labelRange.upperBound
+            continue
+        }
+
+        cursor = value.index(after: cursor)
+        while cursor < value.endIndex, value[cursor].isWhitespace {
+            cursor = value.index(after: cursor)
+        }
+
+        return cursor
+    }
+
+    return nil
+}
+
+private func actionDescriptionTerminatorStart(in value: String, from start: String.Index) -> String.Index? {
+    ["target", "selector", "button clicked"]
+        .compactMap { actionDescriptionLabelStart(label: $0, in: value, from: start) }
+        .min()
+}
+
+private func actionDescriptionLabelStart(label: String, in value: String, from start: String.Index) -> String.Index? {
+    var searchStart = start
+
+    while let labelRange = value.range(of: label, options: [.caseInsensitive], range: searchStart..<value.endIndex) {
+        let beforeLabel = labelRange.lowerBound == value.startIndex ? nil : value.index(before: labelRange.lowerBound)
+        guard beforeLabel == nil || value[beforeLabel!].isWhitespace else {
+            searchStart = labelRange.upperBound
+            continue
+        }
+
+        var cursor = labelRange.upperBound
+        while cursor < value.endIndex, value[cursor].isWhitespace {
+            cursor = value.index(after: cursor)
+        }
+
+        guard cursor < value.endIndex, value[cursor] == ":" else {
+            searchStart = labelRange.upperBound
+            continue
+        }
+
+        return labelRange.lowerBound
+    }
+
+    return nil
+}
+
+private func normalizedSecondaryActionCandidates(_ value: String) -> Set<String> {
+    var candidates = Set<String>()
+    let normalized = normalizedSecondaryActionName(value)
+    if !normalized.isEmpty {
+        candidates.insert(normalized)
+    }
+
+    if let name = accessibilityActionDescriptionName(value) {
+        let normalizedName = normalizedSecondaryActionName(name)
+        if !normalizedName.isEmpty {
+            candidates.insert(normalizedName)
+        }
+    }
+
+    return candidates
 }
 
 private func humanizeAXToken(_ value: String) -> String {

@@ -1,4 +1,4 @@
 interface:
   display_name: "Open Computer Use(OCU)"
-  short_description: "Guide agents using Open Computer Use"
-  default_prompt: "Use $open-computer-use to operate desktop apps through Open Computer Use."
+  short_description: "Guide efficient desktop control with Open Computer Use"
+  default_prompt: "Use $open-computer-use to operate desktop apps through Open Computer Use, using compact state diffs for repeated checks."

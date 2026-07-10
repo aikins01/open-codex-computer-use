@@ -73,6 +73,21 @@ Or add it to your own client manually:
 }
 ```
 
+### macOS image capture
+
+`get_app_state` returns a PNG screenshot together with the accessibility tree. Successful action tools return a compact acknowledgment and refresh the runtime's internal state; call `get_app_state` again when the next step needs updated UI context. On macOS, screenshot size can be tuned with optional environment variables. Set them before starting the `open-computer-use` runtime process; changing shell environment values afterward does not affect an already running process.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT` | `5` | Seconds to wait for ScreenCaptureKit before omitting the screenshot image content from the result. |
+| `OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION` | `1280` | Integer long-edge pixel cap for the returned PNG. |
+| `OPEN_COMPUTER_USE_IMAGE_MAX_BYTES` | `900000` | Best-effort byte budget for the encoded PNG. |
+| `OPEN_COMPUTER_USE_IMAGE_MIN_SCALE` | `0.25` | Byte-budget retry multiplier applied after the dimension cap. For example, a 500 px capped long edge with `0.25` may retry down to 125 px; it never enlarges the PNG chosen by the dimension cap. |
+
+Invalid, non-finite, or non-positive values fall back to the defaults. `OPEN_COMPUTER_USE_IMAGE_MIN_SCALE` values above `1` also fall back.
+
+Coordinate tools keep using the actual returned PNG dimensions, so downsampling does not change click or drag mapping.
+
 ### Skill
 
 Install the skill directly:

@@ -120,6 +120,17 @@ func globalPointerFallbacksEnabled(environment: [String: String]) -> Bool {
     return ["1", "true", "yes", "on"].contains(rawValue)
 }
 
+func globalKeyboardInputEnabled(environment: [String: String]) -> Bool {
+    guard let rawValue = environment["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    else {
+        return false
+    }
+
+    return ["1", "true", "yes", "on"].contains(rawValue)
+}
+
 func screenshotPixelScale(
     screenshotPixelSize: CGSize?,
     windowBounds: CGRect?
@@ -168,6 +179,411 @@ func setValueAttributeIsSettable(result: AXError, settable: Bool, attribute: Str
 
 func invalidSecondaryActionErrorMessage(action: String, elementIndex: Int) -> String {
     "\(action) is not a valid secondary action for \(elementIndex)"
+}
+
+public struct AppStateOutputOptions: Sendable, Equatable {
+    public let includeImage: Bool
+    public let forceImage: Bool
+    public let maxTextChars: Int?
+    public let onlyChanges: Bool
+
+    public static let defaults = AppStateOutputOptions()
+
+    public init(
+        includeImage: Bool = true,
+        forceImage: Bool = false,
+        maxTextChars: Int? = nil,
+        onlyChanges: Bool = false
+    ) {
+        self.includeImage = includeImage
+        self.forceImage = forceImage
+        self.maxTextChars = maxTextChars
+        self.onlyChanges = onlyChanges
+    }
+}
+
+let appStateNoChangeMessage = "There has been no change"
+let appStateDiffHeader = """
+The following is a diff from the previous accessibility tree
+with ~, +, and - representing changed, added, and removed elements, respectively.
+"""
+let appStateDiffMaxLines = 240
+let appStateDiffMaxCharacters = 20_000
+let appStateDiffLineCharacterLimit = 600
+let appStateDiffMaxComparableCells = 1_000_000
+let actionCompletedMessage = "Action completed. Call `get_app_state` to fetch the updated UI state."
+let staleElementMessage = "The element ID is no longer valid. Try to get the on-screen content again and see if that resolves the issue."
+
+private final class AppStateInvalidationObserver {
+    private final class CallbackBox {
+        let onInvalidation: () -> Void
+
+        init(onInvalidation: @escaping () -> Void) {
+            self.onInvalidation = onInvalidation
+        }
+    }
+
+    private static let observedNotifications = [
+        kAXFocusedWindowChangedNotification as String,
+        kAXMainWindowChangedNotification as String,
+        kAXUIElementDestroyedNotification as String,
+        kAXValueChangedNotification as String,
+        kAXSelectedTextChangedNotification as String,
+    ]
+
+    private let observer: AXObserver
+    private let target: AXUIElement
+    private let refcon: UnsafeMutableRawPointer
+    private let notifications: [String]
+
+    init?(pid: pid_t, onInvalidation: @escaping () -> Void) {
+        let box = CallbackBox(onInvalidation: onInvalidation)
+        let refcon = Unmanaged.passRetained(box).toOpaque()
+        var createdObserver: AXObserver?
+        let result = AXObserverCreate(pid, { _, _, _, refcon in
+            guard let refcon else {
+                return
+            }
+            Unmanaged<CallbackBox>.fromOpaque(refcon).takeUnretainedValue().onInvalidation()
+        }, &createdObserver)
+
+        guard result == .success, let createdObserver else {
+            Unmanaged<CallbackBox>.fromOpaque(refcon).release()
+            return nil
+        }
+
+        self.observer = createdObserver
+        self.target = AXUIElementCreateApplication(pid)
+        self.refcon = refcon
+        self.notifications = Self.observedNotifications
+
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        for notification in notifications {
+            _ = AXObserverAddNotification(observer, target, notification as CFString, refcon)
+        }
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+
+    deinit {
+        for notification in notifications {
+            _ = AXObserverRemoveNotification(observer, target, notification as CFString)
+        }
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        Unmanaged<CallbackBox>.fromOpaque(refcon).release()
+    }
+}
+
+struct AppStateOutputCache: Equatable {
+    let renderedText: String
+    let screenshotPNGData: Data?
+    let imageIncluded: Bool
+    let lastIncludedScreenshotPNGData: Data?
+
+    init(
+        renderedText: String,
+        screenshotPNGData: Data?,
+        imageIncluded: Bool = false,
+        lastIncludedScreenshotPNGData: Data? = nil
+    ) {
+        self.renderedText = renderedText
+        self.screenshotPNGData = screenshotPNGData
+        self.imageIncluded = imageIncluded
+        self.lastIncludedScreenshotPNGData = lastIncludedScreenshotPNGData ?? (imageIncluded ? screenshotPNGData : nil)
+    }
+
+    func sameSnapshot(as other: AppStateOutputCache) -> Bool {
+        renderedText == other.renderedText && screenshotPNGData == other.screenshotPNGData
+    }
+}
+
+func limitedAppStateText(_ text: String, maxCharacters: Int?) -> String {
+    guard let maxCharacters, maxCharacters > 0, text.count > maxCharacters else {
+        return text
+    }
+
+    let suffix = "\n\n[truncated after \(maxCharacters) characters]"
+    guard maxCharacters > suffix.count else {
+        return String(text.prefix(maxCharacters))
+    }
+
+    return String(text.prefix(maxCharacters - suffix.count)) + suffix
+}
+
+func appStateChangeText(previous: String, current: String, maxCharacters: Int?) -> String {
+    guard previous != current else {
+        return appStateNoChangeMessage
+    }
+
+    let diff = appStateDiffText(previous: previous, current: current)
+    return limitedAppStateText(diff, maxCharacters: maxCharacters ?? appStateDiffMaxCharacters)
+}
+
+func appStateDiffText(previous: String, current: String) -> String {
+    let previousLines = previous.components(separatedBy: "\n")
+    let currentLines = current.components(separatedBy: "\n")
+    if previousLines.count > 0, currentLines.count > appStateDiffMaxComparableCells / previousLines.count {
+        return ([appStateDiffHeader, "[line diff omitted because the accessibility trees are too large]"] + appStateCurrentTreePreviewLines(currentLines)).joined(separator: "\n")
+    }
+
+    let operations = appStateDiffOperations(previousLines: previousLines, currentLines: currentLines)
+    let diffLines = appStateFormattedDiffLines(operations)
+    return ([appStateDiffHeader] + diffLines).joined(separator: "\n")
+}
+
+private func appStateCurrentTreePreviewLines(_ lines: [String]) -> [String] {
+    var preview = lines.prefix(appStateDiffMaxLines).map { "+ \(limitedAppStateDiffLine($0))" }
+    if lines.count > appStateDiffMaxLines {
+        preview.append("[diff truncated after \(appStateDiffMaxLines) changed lines]")
+    }
+    return preview
+}
+
+private func appStateDiffOperations(previousLines: [String], currentLines: [String]) -> [(String, String)] {
+    let width = currentLines.count + 1
+    var table = Array(repeating: 0, count: (previousLines.count + 1) * width)
+
+    func index(_ previousIndex: Int, _ currentIndex: Int) -> Int {
+        previousIndex * width + currentIndex
+    }
+
+    if !previousLines.isEmpty, !currentLines.isEmpty {
+        for previousIndex in 1...previousLines.count {
+            for currentIndex in 1...currentLines.count {
+                if previousLines[previousIndex - 1] == currentLines[currentIndex - 1] {
+                    table[index(previousIndex, currentIndex)] = table[index(previousIndex - 1, currentIndex - 1)] + 1
+                } else {
+                    table[index(previousIndex, currentIndex)] = max(
+                        table[index(previousIndex - 1, currentIndex)],
+                        table[index(previousIndex, currentIndex - 1)]
+                    )
+                }
+            }
+        }
+    }
+
+    var previousIndex = previousLines.count
+    var currentIndex = currentLines.count
+    var reversed = [(String, String)]()
+    while previousIndex > 0 || currentIndex > 0 {
+        if previousIndex > 0, currentIndex > 0, previousLines[previousIndex - 1] == currentLines[currentIndex - 1] {
+            previousIndex -= 1
+            currentIndex -= 1
+        } else if currentIndex > 0, (previousIndex == 0 || table[index(previousIndex, currentIndex - 1)] >= table[index(previousIndex - 1, currentIndex)]) {
+            reversed.append(("+", currentLines[currentIndex - 1]))
+            currentIndex -= 1
+        } else {
+            reversed.append(("-", previousLines[previousIndex - 1]))
+            previousIndex -= 1
+        }
+    }
+
+    return reversed.reversed()
+}
+
+private func appStateFormattedDiffLines(_ operations: [(String, String)]) -> [String] {
+    var lines = [String]()
+    var operationIndex = 0
+    var truncated = false
+
+    func append(_ line: String) {
+        guard lines.count < appStateDiffMaxLines else {
+            truncated = true
+            return
+        }
+        lines.append(line)
+    }
+
+    while operationIndex < operations.count, !truncated {
+        if operations[operationIndex].0 == "-" {
+            var removals = [String]()
+            while operationIndex < operations.count, operations[operationIndex].0 == "-" {
+                removals.append(operations[operationIndex].1)
+                operationIndex += 1
+            }
+
+            var additions = [String]()
+            while operationIndex < operations.count, operations[operationIndex].0 == "+" {
+                additions.append(operations[operationIndex].1)
+                operationIndex += 1
+            }
+
+            for index in 0..<max(removals.count, additions.count) {
+                if index < removals.count, index < additions.count {
+                    append("~ \(limitedAppStateDiffLine(removals[index])) -> \(limitedAppStateDiffLine(additions[index]))")
+                } else if index < removals.count {
+                    append("- \(limitedAppStateDiffLine(removals[index]))")
+                } else {
+                    append("+ \(limitedAppStateDiffLine(additions[index]))")
+                }
+            }
+        } else {
+            append("+ \(limitedAppStateDiffLine(operations[operationIndex].1))")
+            operationIndex += 1
+        }
+    }
+
+    if lines.isEmpty {
+        lines.append("[accessibility tree changed, but no line-level diff was produced]")
+    }
+    if truncated {
+        lines.append("[diff truncated after \(appStateDiffMaxLines) changed lines]")
+    }
+    return lines
+}
+
+private func limitedAppStateDiffLine(_ line: String) -> String {
+    guard line.count > appStateDiffLineCharacterLimit else {
+        return line
+    }
+
+    let suffix = " ... [line truncated]"
+    guard appStateDiffLineCharacterLimit > suffix.count else {
+        return String(line.prefix(appStateDiffLineCharacterLimit))
+    }
+
+    return String(line.prefix(appStateDiffLineCharacterLimit - suffix.count)) + suffix
+}
+
+func appStateToolResult(
+    renderedText: String,
+    screenshotPNGData: Data?,
+    previous: AppStateOutputCache?,
+    options: AppStateOutputOptions
+) -> ToolCallResult {
+    appStateToolResultWithCache(
+        renderedText: renderedText,
+        screenshotPNGData: screenshotPNGData,
+        previous: previous,
+        options: options
+    ).result
+}
+
+func appStateToolResultWithCache(
+    renderedText: String,
+    screenshotPNGData: Data?,
+    previous: AppStateOutputCache?,
+    options: AppStateOutputOptions
+) -> (result: ToolCallResult, cache: AppStateOutputCache) {
+    let accessibilityUnchanged = options.onlyChanges && previous?.renderedText == renderedText
+    let text: String
+    if options.onlyChanges, let previous {
+        text = appStateChangeText(previous: previous.renderedText, current: renderedText, maxCharacters: options.maxTextChars)
+    } else {
+        text = limitedAppStateText(renderedText, maxCharacters: options.maxTextChars)
+    }
+
+    var content = [ToolResultContentItem.text(text)]
+    var imageIncluded = false
+    var lastIncludedScreenshotPNGData = previous?.lastIncludedScreenshotPNGData
+    if options.includeImage, let screenshotPNGData {
+        let callerHasImage = lastIncludedScreenshotPNGData != nil
+        let callerHasCurrentImage = lastIncludedScreenshotPNGData == screenshotPNGData
+        if options.forceImage || !callerHasImage || (!accessibilityUnchanged && !callerHasCurrentImage) {
+            content.append(.pngImage(screenshotPNGData))
+            imageIncluded = true
+            lastIncludedScreenshotPNGData = screenshotPNGData
+        }
+    }
+
+    return (
+        ToolCallResult(content: content),
+        AppStateOutputCache(
+            renderedText: renderedText,
+            screenshotPNGData: screenshotPNGData,
+            imageIncluded: imageIncluded,
+            lastIncludedScreenshotPNGData: lastIncludedScreenshotPNGData
+        )
+    )
+}
+
+enum TextSelectionMode: String {
+    case text
+    case cursorBefore = "cursor_before"
+    case cursorAfter = "cursor_after"
+
+    init(toolValue: String) throws {
+        let normalized = toolValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty {
+            self = .text
+            return
+        }
+
+        guard let mode = TextSelectionMode(rawValue: normalized) else {
+            throw ComputerUseError.message("Invalid selection: \(toolValue)")
+        }
+
+        self = mode
+    }
+
+    func selectedRange(for match: NSRange) -> NSRange {
+        switch self {
+        case .text:
+            return match
+        case .cursorBefore:
+            return NSRange(location: match.location, length: 0)
+        case .cursorAfter:
+            return NSRange(location: match.location + match.length, length: 0)
+        }
+    }
+}
+
+func textSelectionMatch(in value: String, text: String, prefix: String?, suffix: String?) throws -> NSRange {
+    let target = text as NSString
+    guard target.length > 0 else {
+        throw ComputerUseError.missingArgument("text")
+    }
+
+    let haystack = value as NSString
+    let prefix = prefix ?? ""
+    let suffix = suffix ?? ""
+    let prefixLength = (prefix as NSString).length
+    let suffixLength = (suffix as NSString).length
+    var matches: [NSRange] = []
+    var searchRange = NSRange(location: 0, length: haystack.length)
+
+    while searchRange.length >= target.length {
+        let found = haystack.range(of: text, options: [], range: searchRange)
+        if found.location == NSNotFound {
+            break
+        }
+
+        let afterStart = found.location + found.length
+        let prefixMatches = prefixLength == 0 || (
+            found.location >= prefixLength
+                && haystack.compare(
+                    prefix,
+                    options: [],
+                    range: NSRange(location: found.location - prefixLength, length: prefixLength)
+                ) == .orderedSame
+        )
+        let suffixMatches = suffixLength == 0 || (
+            haystack.length - afterStart >= suffixLength
+                && haystack.compare(
+                    suffix,
+                    options: [],
+                    range: NSRange(location: afterStart, length: suffixLength)
+                ) == .orderedSame
+        )
+        if prefixMatches && suffixMatches {
+            matches.append(found)
+        }
+
+        let nextLocation = found.location + max(found.length, 1)
+        if nextLocation > haystack.length {
+            break
+        }
+        searchRange = NSRange(location: nextLocation, length: haystack.length - nextLocation)
+    }
+
+    if matches.isEmpty {
+        throw ComputerUseError.message("Target text not found in element")
+    }
+
+    if matches.count > 1 {
+        throw ComputerUseError.message("Target text is ambiguous; provide prefix or suffix")
+    }
+
+    return matches[0]
 }
 
 func localClickActionPoints(frame: CGRect, isSyntheticText: Bool) -> [CGPoint] {
@@ -349,8 +765,21 @@ func shouldPreferContainingWebRowAXClickCandidate(
 
 public final class ComputerUseService {
     private var snapshotsByApp: [String: AppSnapshot] = [:]
+    private var appStateOutputsByApp: [String: AppStateOutputCache] = [:]
+    private var invalidationObserversByPID: [pid_t: AppStateInvalidationObserver] = [:]
+    private var dirtySnapshotPIDs = Set<pid_t>()
+    private let dirtySnapshotLock = NSLock()
 
     public init() {}
+
+    public func resetTurnState() {
+        snapshotsByApp.removeAll(keepingCapacity: true)
+        appStateOutputsByApp.removeAll(keepingCapacity: true)
+        invalidationObserversByPID.removeAll(keepingCapacity: true)
+        dirtySnapshotLock.lock()
+        dirtySnapshotPIDs.removeAll(keepingCapacity: true)
+        dirtySnapshotLock.unlock()
+    }
 
     public func listApps() -> ToolCallResult {
         ToolCallResult.text(
@@ -360,8 +789,17 @@ public final class ComputerUseService {
         )
     }
 
-    public func getAppState(app query: String, showFullText: Bool = false) throws -> ToolCallResult {
-        snapshotResult(for: try refreshSnapshot(for: query, showFullText: showFullText), style: .fullState)
+    public func getAppState(
+        app query: String,
+        showFullText: Bool = false,
+        outputOptions: AppStateOutputOptions = .defaults
+    ) throws -> ToolCallResult {
+        appStateResult(
+            for: try refreshSnapshot(for: query, showFullText: showFullText),
+            query: query,
+            style: .fullState,
+            options: outputOptions
+        )
     }
 
     public func click(app query: String, elementIndex: String?, x: Double?, y: Double?, clickCount: Int, mouseButton: String) throws -> ToolCallResult {
@@ -388,11 +826,13 @@ public final class ComputerUseService {
 
             Thread.sleep(forTimeInterval: 0.15)
             pulseVisualCursor(at: cursorTarget, clickCount: clickCount, mouseButton: button)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionCompletedResult(afterRefreshing: query)
         }
 
         if let elementIndex {
-            let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+            let resolved = try elementForAction(query: query, index: elementIndex)
+            let snapshot = resolved.snapshot
+            let record = resolved.record
             guard let targetPoint = try globalClickPoint(for: record, snapshot: snapshot) else {
                 throw ComputerUseError.stateUnavailable("element \(elementIndex) has no clickable frame")
             }
@@ -475,19 +915,20 @@ public final class ComputerUseService {
             throw ComputerUseError.invalidArguments("click requires either element_index or x/y")
         }
 
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionCompletedResult(afterRefreshing: query)
     }
 
     public func performSecondaryAction(app query: String, elementIndex: String, action: String) throws -> ToolCallResult {
-        let snapshot = try currentSnapshot(for: query)
-        let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+        let resolved = try elementForAction(query: query, index: elementIndex)
+        let snapshot = resolved.snapshot
+        let record = resolved.record
 
         if snapshot.mode == .fixture {
             guard action.caseInsensitiveCompare("Raise") == .orderedSame else {
                 throw ComputerUseError.message(invalidSecondaryActionMessage(action: action, record: record))
             }
 
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionCompletedResult(afterRefreshing: query)
         }
 
         guard let rawAction = matchingAction(requested: action, record: record) else {
@@ -504,7 +945,7 @@ public final class ComputerUseService {
         }
 
         Thread.sleep(forTimeInterval: 0.15)
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionCompletedResult(afterRefreshing: query)
     }
 
     public func scroll(app query: String, direction: String, elementIndex: String, pages: Double) throws -> ToolCallResult {
@@ -516,8 +957,9 @@ public final class ComputerUseService {
             throw ComputerUseError.message("pages must be > 0")
         }
 
-        let snapshot = try currentSnapshot(for: query)
-        let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+        let resolved = try elementForAction(query: query, index: elementIndex)
+        let snapshot = resolved.snapshot
+        let record = resolved.record
 
         if snapshot.mode == .fixture {
             guard let identifier = record.identifier else {
@@ -525,7 +967,7 @@ public final class ComputerUseService {
             }
             try FixtureBridge.post(FixtureCommand(kind: "scroll", identifier: identifier, direction: normalized, pages: pages))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionCompletedResult(afterRefreshing: query)
         }
 
         if let repeatCount = integralScrollPageCount(pages),
@@ -547,7 +989,44 @@ public final class ComputerUseService {
             throw ComputerUseError.stateUnavailable("element \(elementIndex) has no scrollable frame")
         }
 
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionCompletedResult(afterRefreshing: query)
+    }
+
+    public func selectText(app query: String, elementIndex: String, text: String, prefix: String?, suffix: String?, selection: String) throws -> ToolCallResult {
+        let mode = try TextSelectionMode(toolValue: selection)
+        let resolved = try elementForAction(query: query, index: elementIndex)
+        let snapshot = resolved.snapshot
+        let record = resolved.record
+
+        if snapshot.mode == .fixture {
+            guard let identifier = record.identifier else {
+                throw ComputerUseError.invalidArguments("fixture select_text requires an identifier-backed element")
+            }
+
+            try FixtureBridge.post(FixtureCommand(
+                kind: "select_text",
+                identifier: identifier,
+                value: text,
+                prefix: prefix,
+                suffix: suffix,
+                selection: mode.rawValue
+            ))
+            Thread.sleep(forTimeInterval: 0.15)
+            return try actionCompletedResult(afterRefreshing: query)
+        }
+
+        guard let element = record.element else {
+            throw ComputerUseError.stateUnavailable("element \(elementIndex) has no backing accessibility object")
+        }
+
+        guard let value = selectableTextValue(for: element) else {
+            throw ComputerUseError.message("Cannot select text for an element that does not expose text")
+        }
+
+        let match = try textSelectionMatch(in: value, text: text, prefix: prefix, suffix: suffix)
+        try setSelectedTextRange(mode.selectedRange(for: match), on: element)
+        Thread.sleep(forTimeInterval: 0.1)
+        return try actionCompletedResult(afterRefreshing: query)
     }
 
     public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double) throws -> ToolCallResult {
@@ -555,7 +1034,7 @@ public final class ComputerUseService {
         if snapshot.mode == .fixture {
             try FixtureBridge.post(FixtureCommand(kind: "drag", identifier: "fixture-drag-pad", x: fromX, y: fromY, toX: toX, toY: toY))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionCompletedResult(afterRefreshing: query)
         }
 
         let start = try screenshotToGlobalPoint(snapshot: snapshot, x: fromX, y: fromY)
@@ -566,7 +1045,7 @@ public final class ComputerUseService {
             targetDescription: "from=(\(Int(fromX)), \(Int(fromY))) to=(\(Int(toX)), \(Int(toY)))",
             snapshot: snapshot
         )
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionCompletedResult(afterRefreshing: query)
     }
 
     public func typeText(app query: String, text: String) throws -> ToolCallResult {
@@ -574,12 +1053,12 @@ public final class ComputerUseService {
         if snapshot.mode == .fixture {
             try FixtureBridge.post(FixtureCommand(kind: "type_text", identifier: "fixture-input", value: text))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionCompletedResult(afterRefreshing: query)
         }
 
         if try typeTextBySettingFocusedValueIfAvailable(text, in: snapshot) {
             Thread.sleep(forTimeInterval: 0.1)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionCompletedResult(afterRefreshing: query)
         }
 
         guard try canTypeTextUsingKeyboardFallback(in: snapshot) else {
@@ -587,7 +1066,7 @@ public final class ComputerUseService {
         }
 
         try InputSimulation.typeText(text, pid: snapshot.app.pid)
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionCompletedResult(afterRefreshing: query)
     }
 
     public func pressKey(app query: String, key: String) throws -> ToolCallResult {
@@ -595,16 +1074,24 @@ public final class ComputerUseService {
         if snapshot.mode == .fixture {
             try FixtureBridge.post(FixtureCommand(kind: "press_key", identifier: "fixture-key-capture", value: key))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionCompletedResult(afterRefreshing: query)
         }
 
-        try InputSimulation.pressKey(key, pid: snapshot.app.pid)
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        if globalKeyboardInputEnabled(environment: ProcessInfo.processInfo.environment) {
+            debugInputFallback(tool: "press_key", targetDescription: key, snapshot: snapshot)
+            try InputSimulation.prepareAppForGlobalKeyboardInput(snapshot.app)
+            try InputSimulation.pressKeyGlobally(key)
+        } else {
+            try InputSimulation.pressKey(key, pid: snapshot.app.pid)
+        }
+
+        return try actionCompletedResult(afterRefreshing: query)
     }
 
     public func setValue(app query: String, elementIndex: String, value: String) throws -> ToolCallResult {
-        let snapshot = try currentSnapshot(for: query)
-        let record = try lookupElement(snapshot: snapshot, index: elementIndex)
+        let resolved = try elementForAction(query: query, index: elementIndex)
+        let snapshot = resolved.snapshot
+        let record = resolved.record
 
         if snapshot.mode == .fixture {
             guard let identifier = record.identifier else {
@@ -616,7 +1103,7 @@ public final class ComputerUseService {
             try FixtureBridge.post(FixtureCommand(kind: "set_value", identifier: identifier, value: value))
             Thread.sleep(forTimeInterval: 0.15)
             settleVisualCursor(at: cursorTarget)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return try actionCompletedResult(afterRefreshing: query)
         }
 
         guard let element = record.element else {
@@ -643,33 +1130,51 @@ public final class ComputerUseService {
         }
 
         settleVisualCursor(at: cursorTarget)
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+        return try actionCompletedResult(afterRefreshing: query)
     }
 
     private func currentSnapshot(for query: String) throws -> AppSnapshot {
-        if let snapshot = snapshotsByApp[query.lowercased()] {
+        if let snapshot = cachedSnapshot(for: query) {
             return snapshot
         }
 
-        return try refreshSnapshot(for: query)
+        throw ComputerUseError.stateUnavailable("No app state is available for \(query). Run get_app_state before action tools.")
+    }
+
+    func cachedSnapshot(for query: String) -> AppSnapshot? {
+        snapshotsByApp[query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()]
     }
 
     @discardableResult
     private func refreshSnapshot(for query: String, showFullText: Bool = false) throws -> AppSnapshot {
-        let app = try AppDiscovery.resolve(query)
-        let snapshot = try SnapshotBuilder.build(for: app, showFullText: showFullText)
+        let snapshot = try captureSnapshot(for: query, showFullText: showFullText)
+        publishSnapshot(snapshot, for: query)
+        return snapshot
+    }
 
+    private func captureSnapshot(for query: String, showFullText: Bool = false) throws -> AppSnapshot {
+        let app = try AppDiscovery.resolve(query)
+        clearSnapshotDirty(pid: app.pid)
+        do {
+            return try SnapshotBuilder.build(for: app, showFullText: showFullText)
+        } catch {
+            markSnapshotDirty(pid: app.pid)
+            throw error
+        }
+    }
+
+    func publishSnapshot(_ snapshot: AppSnapshot, for query: String) {
         let keys = Set([
-            query.lowercased(),
-            app.name.lowercased(),
-            (app.bundleIdentifier ?? "").lowercased(),
-        ].filter { !$0.isEmpty })
+            query,
+            snapshot.app.name,
+            snapshot.app.bundleIdentifier ?? "",
+        ].map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty })
 
         for key in keys {
             snapshotsByApp[key] = snapshot
         }
 
-        return snapshot
+        installInvalidationObserver(for: snapshot)
     }
 
     private func lookupElement(snapshot: AppSnapshot, index: String) throws -> ElementRecord {
@@ -680,13 +1185,18 @@ public final class ComputerUseService {
         return record
     }
 
-    private func matchingAction(requested: String, record: ElementRecord) -> String? {
-        if let exact = record.rawActions.first(where: { $0.caseInsensitiveCompare(requested) == .orderedSame }) {
-            return exact
-        }
+    func matchingAction(requested: String, record: ElementRecord) -> String? {
+        let visibleRawActions = record.role.map { meaningfulRawActions(record.rawActions, role: $0) } ?? record.rawActions
 
-        if let pretty = zip(record.rawActions, record.prettyActions).first(where: { $0.1.caseInsensitiveCompare(requested) == .orderedSame }) {
-            return pretty.0
+        for rawAction in visibleRawActions {
+            let displayName = secondaryActionDisplayName(rawAction)
+
+            if rawAction.caseInsensitiveCompare(requested) == .orderedSame ||
+                displayName.caseInsensitiveCompare(requested) == .orderedSame ||
+                secondaryActionNamesEquivalent(requested, displayName)
+            {
+                return rawAction
+            }
         }
 
         return nil
@@ -694,6 +1204,188 @@ public final class ComputerUseService {
 
     private func invalidSecondaryActionMessage(action: String, record: ElementRecord) -> String {
         invalidSecondaryActionErrorMessage(action: action, elementIndex: record.index)
+    }
+
+    private func appStateResult(
+        for snapshot: AppSnapshot,
+        query: String,
+        style: SnapshotTextStyle,
+        options: AppStateOutputOptions
+    ) -> ToolCallResult {
+        let renderedText = snapshot.renderedText(style: style)
+        let keys = appStateCacheKeys(query: query, snapshot: snapshot)
+        let previous = keys.lazy.compactMap { self.appStateOutputsByApp[$0] }.first
+        let output = appStateToolResultWithCache(
+            renderedText: renderedText,
+            screenshotPNGData: snapshot.screenshotPNGData,
+            previous: previous,
+            options: options
+        )
+        for key in keys {
+            appStateOutputsByApp[key] = output.cache
+        }
+        return output.result
+    }
+
+    private func appStateCacheKeys(query: String, snapshot: AppSnapshot) -> [String] {
+        var seen = Set<String>()
+        var keys: [String] = []
+        for key in [query, snapshot.app.name, snapshot.app.bundleIdentifier ?? ""] {
+            let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !normalized.isEmpty, seen.insert(normalized).inserted {
+                keys.append(normalized)
+            }
+        }
+        return keys
+    }
+
+    private func installInvalidationObserver(for snapshot: AppSnapshot) {
+        let pid = snapshot.app.pid
+        guard snapshot.mode == .accessibility, invalidationObserversByPID[pid] == nil else {
+            return
+        }
+
+        invalidationObserversByPID[pid] = AppStateInvalidationObserver(pid: pid) { [weak self] in
+            self?.markSnapshotDirty(pid: pid)
+        }
+    }
+
+    private func markSnapshotDirty(pid: pid_t) {
+        dirtySnapshotLock.lock()
+        dirtySnapshotPIDs.insert(pid)
+        dirtySnapshotLock.unlock()
+    }
+
+    private func clearSnapshotDirty(pid: pid_t) {
+        dirtySnapshotLock.lock()
+        dirtySnapshotPIDs.remove(pid)
+        dirtySnapshotLock.unlock()
+    }
+
+    private func isSnapshotDirty(_ snapshot: AppSnapshot) -> Bool {
+        dirtySnapshotLock.lock()
+        let dirty = dirtySnapshotPIDs.contains(snapshot.app.pid)
+        dirtySnapshotLock.unlock()
+        return dirty
+    }
+
+    private func elementForAction(query: String, index: String) throws -> (snapshot: AppSnapshot, record: ElementRecord) {
+        let snapshot = try currentSnapshot(for: query)
+        let record = try lookupElement(snapshot: snapshot, index: index)
+
+        guard snapshot.mode == .accessibility else {
+            return (snapshot, record)
+        }
+
+        if isSnapshotDirty(snapshot) || isInvalidAccessibilityElement(record.element) {
+            return try refetchedElementForAction(query: query, previousSnapshot: snapshot, previousRecord: record)
+        }
+
+        return (snapshot, record)
+    }
+
+    private func refetchedElementForAction(
+        query: String,
+        previousSnapshot: AppSnapshot,
+        previousRecord: ElementRecord
+    ) throws -> (snapshot: AppSnapshot, record: ElementRecord) {
+        let refreshed = try captureSnapshot(for: query, showFullText: previousSnapshot.showFullText)
+        let match = try publishRefetchedSnapshotIfElementMatches(
+            refreshed,
+            for: query,
+            previousSnapshot: previousSnapshot,
+            previousRecord: previousRecord
+        )
+        return (refreshed, match)
+    }
+
+    func publishRefetchedSnapshotIfElementMatches(
+        _ refreshedSnapshot: AppSnapshot,
+        for query: String,
+        previousSnapshot: AppSnapshot,
+        previousRecord: ElementRecord
+    ) throws -> ElementRecord {
+        guard let match = matchingElement(
+            previousRecord: previousRecord,
+            previousSnapshot: previousSnapshot,
+            refreshedSnapshot: refreshedSnapshot
+        ) else {
+            markSnapshotDirty(pid: previousSnapshot.app.pid)
+            throw ComputerUseError.stateUnavailable(staleElementMessage)
+        }
+
+        publishSnapshot(refreshedSnapshot, for: query)
+        return match
+    }
+
+    func matchingElement(
+        previousRecord: ElementRecord,
+        previousSnapshot: AppSnapshot,
+        refreshedSnapshot: AppSnapshot
+    ) -> ElementRecord? {
+        guard let previousLine = elementTreeLineBody(for: previousRecord, in: previousSnapshot) else {
+            return nil
+        }
+
+        let candidates = refreshedSnapshot.elements.values.filter { candidate in
+            if let identifier = previousRecord.identifier, candidate.identifier != identifier {
+                return false
+            }
+
+            guard candidate.isSyntheticText == previousRecord.isSyntheticText,
+                  elementTreeLineBody(for: candidate, in: refreshedSnapshot) == previousLine
+            else {
+                return false
+            }
+
+            if let previousFrame = previousRecord.localFrame, let candidateFrame = candidate.localFrame {
+                return framesLikelyReferToSameElement(previousFrame, candidateFrame)
+            }
+
+            return previousRecord.localFrame == nil && candidate.localFrame == nil
+        }
+
+        if candidates.count == 1 {
+            return candidates[0]
+        }
+
+        return nil
+    }
+
+    private func elementTreeLineBody(for record: ElementRecord, in snapshot: AppSnapshot) -> String? {
+        for line in snapshot.treeLines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let parts = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard parts.count == 2, parts[0] == String(record.index) else {
+                continue
+            }
+
+            return String(parts[1])
+        }
+
+        return nil
+    }
+
+    private func framesLikelyReferToSameElement(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) <= 16
+            && abs(lhs.minY - rhs.minY) <= 16
+            && abs(lhs.width - rhs.width) <= 32
+            && abs(lhs.height - rhs.height) <= 32
+    }
+
+    private func isInvalidAccessibilityElement(_ element: AXUIElement?) -> Bool {
+        guard let element else {
+            return false
+        }
+
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .invalidUIElement
+    }
+
+    private func actionCompletedResult(afterRefreshing query: String) throws -> ToolCallResult {
+        let showFullText = cachedSnapshot(for: query)?.showFullText ?? false
+        _ = try refreshSnapshot(for: query, showFullText: showFullText)
+        return ToolCallResult.text(actionCompletedMessage)
     }
 
     private func performPreferredClick(on record: ElementRecord, button: MouseButtonKind, clickCount: Int) throws -> Bool {
@@ -1232,6 +1924,40 @@ public final class ComputerUseService {
         }
     }
 
+    private func selectableTextValue(for element: AXUIElement) -> String? {
+        for attribute in [
+            kAXValueAttribute as String,
+            kAXTitleAttribute as String,
+            kAXDescriptionAttribute as String,
+            kAXHelpAttribute as String,
+        ] {
+            guard let value = stringValue(of: element, attribute: attribute), !value.isEmpty else {
+                continue
+            }
+
+            return value
+        }
+
+        return nil
+    }
+
+    private func setSelectedTextRange(_ range: NSRange, on element: AXUIElement) throws {
+        var cfRange = CFRange(location: range.location, length: range.length)
+        guard let value = AXValueCreate(.cfRange, &cfRange) else {
+            throw ComputerUseError.message("Failed to encode selected text range")
+        }
+
+        let result = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value)
+        switch result {
+        case .success:
+            return
+        case .failure, .attributeUnsupported, .actionUnsupported, .cannotComplete, .noValue, .invalidUIElement, .illegalArgument:
+            throw ComputerUseError.message("Cannot select text for an element that does not expose a settable text selection range")
+        default:
+            throw ComputerUseError.message("AXUIElementSetAttributeValue(\(kAXSelectedTextRangeAttribute)) failed with \(result.rawValue)")
+        }
+    }
+
     private func canTypeTextUsingKeyboardFallback(in snapshot: AppSnapshot) throws -> Bool {
         guard let element = snapshot.focusedElement else {
             return false
@@ -1570,7 +2296,7 @@ public final class ComputerUseService {
 
         let appReference = snapshot.app.bundleIdentifier ?? snapshot.app.name
         fputs(
-            "[open-computer-use] global pointer fallback tool=\(tool) app=\(appReference) target=\(targetDescription)\n",
+            "[open-computer-use] global input fallback tool=\(tool) app=\(appReference) target=\(targetDescription)\n",
             stderr
         )
     }
@@ -1681,11 +2407,4 @@ public final class ComputerUseService {
         }
     }
 
-    private func snapshotResult(for snapshot: AppSnapshot, style: SnapshotTextStyle) -> ToolCallResult {
-        var content = [ToolResultContentItem.text(snapshot.renderedText(style: style))]
-        if let screenshotPNGData = snapshot.screenshotPNGData {
-            content.append(.pngImage(screenshotPNGData))
-        }
-        return ToolCallResult(content: content)
-    }
 }

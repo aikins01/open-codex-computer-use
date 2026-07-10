@@ -36,11 +36,47 @@ private func normalizedElementIndexNumber(_ value: Double) -> String? {
     return String(Int(value))
 }
 
+func normalizedNonNegativeIntegerArgument(_ value: Any?) -> Int? {
+    if let integer = value as? Int {
+        return integer >= 0 ? integer : nil
+    }
+
+    if let number = value as? NSNumber {
+        if CFGetTypeID(number as CFTypeRef) == CFBooleanGetTypeID() {
+            return nil
+        }
+
+        return normalizedNonNegativeIntegerNumber(number.doubleValue)
+    }
+
+    if let double = value as? Double {
+        return normalizedNonNegativeIntegerNumber(double)
+    }
+
+    return nil
+}
+
+private func normalizedNonNegativeIntegerNumber(_ value: Double) -> Int? {
+    guard value.isFinite, value.rounded(.towardZero) == value else {
+        return nil
+    }
+
+    guard value >= 0, value <= Double(Int.max) else {
+        return nil
+    }
+
+    return Int(value)
+}
+
 public final class ComputerUseToolDispatcher {
     private let service: ComputerUseService
 
     public init(service: ComputerUseService = ComputerUseService()) {
         self.service = service
+    }
+
+    public func resetTurnState() {
+        service.resetTurnState()
     }
 
     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
@@ -50,7 +86,13 @@ public final class ComputerUseToolDispatcher {
         case "get_app_state":
             return try service.getAppState(
                 app: requireString("app", in: arguments),
-                showFullText: optionalBool("show_full_text", in: arguments) ?? false
+                showFullText: optionalBool("show_full_text", in: arguments) ?? false,
+                outputOptions: AppStateOutputOptions(
+                    includeImage: optionalBool("include_image", in: arguments) ?? true,
+                    forceImage: optionalBool("force_image", in: arguments) ?? false,
+                    maxTextChars: try optionalNonNegativeInt("max_text_chars", in: arguments),
+                    onlyChanges: optionalBool("only_changes", in: arguments) ?? false
+                )
             )
         case "click":
             return try service.click(
@@ -73,6 +115,15 @@ public final class ComputerUseToolDispatcher {
                 direction: requireString("direction", in: arguments),
                 elementIndex: requireElementIndex(in: arguments),
                 pages: optionalDouble("pages", in: arguments) ?? 1
+            )
+        case "select_text":
+            return try service.selectText(
+                app: requireString("app", in: arguments),
+                elementIndex: requireElementIndex(in: arguments),
+                text: requireString("text", in: arguments),
+                prefix: optionalString("prefix", in: arguments),
+                suffix: optionalString("suffix", in: arguments),
+                selection: optionalString("selection", in: arguments) ?? "text"
             )
         case "drag":
             return try service.drag(
@@ -177,6 +228,18 @@ public final class ComputerUseToolDispatcher {
         }
 
         return nil
+    }
+
+    private func optionalNonNegativeInt(_ key: String, in arguments: [String: Any]) throws -> Int? {
+        guard arguments.keys.contains(key) else {
+            return nil
+        }
+
+        guard let value = normalizedNonNegativeIntegerArgument(arguments[key]) else {
+            throw ComputerUseError.invalidArguments("\(key) must be a non-negative integer")
+        }
+
+        return value
     }
 }
 

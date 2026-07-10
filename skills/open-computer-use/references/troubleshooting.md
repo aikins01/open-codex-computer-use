@@ -50,6 +50,16 @@ open-computer-use snapshot --show-full-text TextEdit
 
 `show_full_text` only disables the text character limit. It does not remove node count, tree depth, screenshot size, permission, or desktop-session protections.
 
+## Large Or Repeated Snapshots
+
+If a host thread is growing quickly or repeated state checks are polluting context, poll with text-only change output:
+
+```sh
+open-computer-use call get_app_state --args '{"app":"TextEdit","include_image":false,"only_changes":true,"max_text_chars":20000}'
+```
+
+The first call returns capped state. Later calls return `There has been no change` or a compact diff from the previous accessibility tree. Request `include_image:true` or `force_image:true` only when visual state is needed.
+
 ## Element Action Fails
 
 If an element-targeted action fails:
@@ -59,6 +69,8 @@ If an element-targeted action fails:
 3. Prefer `set_value` for settable text/value controls.
 4. Prefer `perform_secondary_action` only for actions exposed in the state result.
 5. Use coordinate `click`, `scroll`, or `drag` only after the semantic route is unavailable.
+
+If the action says `The element ID is no longer valid`, the UI changed enough that Open Computer Use could not safely refetch the old target. Run `get_app_state` again and choose the current element index.
 
 ## Desktop Session Issues
 

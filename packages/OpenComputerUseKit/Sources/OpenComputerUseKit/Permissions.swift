@@ -172,6 +172,10 @@ public enum PermissionSupport {
             return runningBundleURL ?? preferredInstalledBundleURL ?? fallbackDevelopmentBundleURL
         }
 
+        if isDevelopmentAppBundle(runningBundleURL) {
+            return runningBundleURL
+        }
+
         return preferredInstalledBundleURL ?? runningBundleURL ?? fallbackDevelopmentBundleURL
     }
 
@@ -419,7 +423,15 @@ public enum PermissionSupport {
     }
 
     private static func isDevelopmentAppBundle(_ bundleURL: URL?) -> Bool {
-        guard let bundleURL, let bundle = Bundle(url: bundleURL) else {
+        guard let bundleURL else {
+            return false
+        }
+
+        if bundleURL.lastPathComponent == developmentAppBundleName {
+            return true
+        }
+
+        guard let bundle = Bundle(url: bundleURL) else {
             return false
         }
 
@@ -433,7 +445,7 @@ public enum PermissionSupport {
             return true
         }
 
-        return bundleURL.lastPathComponent == developmentAppBundleName
+        return false
     }
 
     private static func isValidAppBundle(

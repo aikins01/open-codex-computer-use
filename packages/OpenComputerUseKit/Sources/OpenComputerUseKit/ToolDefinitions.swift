@@ -72,6 +72,10 @@ public enum ToolDefinitions {
                 properties: [
                     "app": stringProperty(description: "App name or bundle identifier"),
                     "show_full_text": booleanProperty(description: "Return full accessibility text without the default 500 character truncation. Defaults to false."),
+                    "include_image": booleanProperty(description: "Return a screenshot image block when one is available. Defaults to true."),
+                    "force_image": booleanProperty(description: "Return the screenshot even when it matches the previous app state for this app. Defaults to false."),
+                    "max_text_chars": integerProperty(description: "Maximum characters to return from the rendered accessibility text. Set 0 for no post-render cap.", minimum: 0),
+                    "only_changes": booleanProperty(description: "Return only accessibility-tree changes after the previous get_app_state result for this app: a no-change message when stable or a compact diff when changed. Defaults to false."),
                 ],
                 required: ["app"]
             )
@@ -119,6 +123,25 @@ public enum ToolDefinitions {
                     "pages": numberProperty(description: "Number of pages to scroll. Fractional values are supported. Defaults to 1"),
                 ],
                 required: ["app", "element_index", "direction"]
+            )
+        ),
+        ToolDefinition(
+            name: "select_text",
+            description: "Select text inside a text element, or place the text cursor before or after it. Provide text exactly as it appears in the accessibility tree, including any Markdown formatting. If the text is not unique, provide surrounding prefix or suffix text to disambiguate it.",
+            annotations: defaultAnnotations(),
+            inputSchema: objectSchema(
+                properties: [
+                    "app": stringProperty(description: "App name or bundle identifier"),
+                    "element_index": stringProperty(description: "Text element identifier"),
+                    "text": stringProperty(description: "Target text as shown in the accessibility tree"),
+                    "prefix": stringProperty(description: "Optional text immediately before the target, used to disambiguate repeated matches"),
+                    "suffix": stringProperty(description: "Optional text immediately after the target, used to disambiguate repeated matches"),
+                    "selection": stringProperty(
+                        description: "Whether to select the text or place the cursor before or after it. Defaults to text.",
+                        enumValues: ["text", "cursor_before", "cursor_after"]
+                    ),
+                ],
+                required: ["app", "element_index", "text"]
             )
         ),
         ToolDefinition(
@@ -199,11 +222,17 @@ private func booleanProperty(description: String) -> [String: Any] {
     ]
 }
 
-private func integerProperty(description: String) -> [String: Any] {
-    [
+private func integerProperty(description: String, minimum: Int? = nil) -> [String: Any] {
+    var property: [String: Any] = [
         "type": "integer",
         "description": description,
     ]
+
+    if let minimum {
+        property["minimum"] = minimum
+    }
+
+    return property
 }
 
 private func numberProperty(description: String) -> [String: Any] {

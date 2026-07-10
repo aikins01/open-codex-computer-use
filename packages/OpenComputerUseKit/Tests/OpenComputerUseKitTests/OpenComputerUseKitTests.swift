@@ -175,8 +175,409 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(size.height, 24)
     }
 
+    func testImageCaptureConfigReadsValidEnvironmentOverrides() {
+        let config = ImageCaptureConfig.fromEnvironment([
+            "OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT": " 2.5 ",
+            "OPEN_COMPUTER_USE_IMAGE_MAX_BYTES": " 120000 ",
+            "OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION": " 640 ",
+            "OPEN_COMPUTER_USE_IMAGE_MIN_SCALE": "0.1",
+        ])
+
+        XCTAssertEqual(config.captureTimeout, 2.5)
+        XCTAssertEqual(config.maxPNGBytes, 120_000)
+        XCTAssertEqual(config.maxDimension, 640)
+        XCTAssertEqual(config.minScale, 0.1)
+    }
+
+    func testImageCaptureConfigFallsBackForInvalidEnvironmentOverrides() {
+        let config = ImageCaptureConfig.fromEnvironment([
+            "OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT": "0",
+            "OPEN_COMPUTER_USE_IMAGE_MAX_BYTES": "nope",
+            "OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION": "0",
+            "OPEN_COMPUTER_USE_IMAGE_MIN_SCALE": "0",
+        ])
+
+        XCTAssertEqual(config, ImageCaptureConfig.defaults)
+    }
+
+    func testImageCaptureConfigFallsBackForBlankAndNonFiniteOverrides() {
+        let config = ImageCaptureConfig.fromEnvironment([
+            "OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT": "nan",
+            "OPEN_COMPUTER_USE_IMAGE_MAX_BYTES": " ",
+            "OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION": "inf",
+            "OPEN_COMPUTER_USE_IMAGE_MIN_SCALE": "nan",
+        ])
+
+        XCTAssertEqual(config, ImageCaptureConfig.defaults)
+    }
+
+    func testImageCaptureConfigAcceptsUnitMinScaleBoundary() {
+        let config = ImageCaptureConfig.fromEnvironment([
+            "OPEN_COMPUTER_USE_IMAGE_MIN_SCALE": "1",
+        ])
+
+        XCTAssertEqual(config.minScale, 1)
+    }
+
+    func testImageCaptureConfigFallsBackForMinScaleAboveUnitBoundary() {
+        let config = ImageCaptureConfig.fromEnvironment([
+            "OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT": "-1",
+            "OPEN_COMPUTER_USE_IMAGE_MIN_SCALE": "1.01",
+        ])
+
+        XCTAssertEqual(config.captureTimeout, ImageCaptureConfig.defaults.captureTimeout)
+        XCTAssertEqual(config.minScale, ImageCaptureConfig.defaults.minScale)
+    }
+
+    func testImageCaptureConfigFallsBackForNegativeMinScale() {
+        let config = ImageCaptureConfig.fromEnvironment([
+            "OPEN_COMPUTER_USE_IMAGE_MIN_SCALE": "-0.1",
+        ])
+
+        XCTAssertEqual(config.minScale, ImageCaptureConfig.defaults.minScale)
+    }
+
+    func testImageCaptureConfigFallsBackForFractionalDimensionAndIntegerOverflow() {
+        let config = ImageCaptureConfig.fromEnvironment([
+            "OPEN_COMPUTER_USE_IMAGE_MAX_BYTES": "92233720368547758070",
+            "OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION": "80.6",
+        ])
+
+        XCTAssertEqual(config.maxPNGBytes, ImageCaptureConfig.defaults.maxPNGBytes)
+        XCTAssertEqual(config.maxDimension, ImageCaptureConfig.defaults.maxDimension)
+    }
+
+    func testImageCaptureConfigFallsBackForUnicodeDigits() {
+        let config = ImageCaptureConfig.fromEnvironment([
+            "OPEN_COMPUTER_USE_IMAGE_MAX_BYTES": "１２３",
+            "OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION": "４８０",
+        ])
+
+        XCTAssertEqual(config.maxPNGBytes, ImageCaptureConfig.defaults.maxPNGBytes)
+        XCTAssertEqual(config.maxDimension, ImageCaptureConfig.defaults.maxDimension)
+    }
+
+    func testBoundedScreenshotPNGDataHonorsMaxDimensionBelowMinScale() throws {
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+        let data = try XCTUnwrap(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 1_000_000,
+            maxDimension: 80,
+            minScale: 0.25
+        ))
+        let size = try imageSize(in: data)
+
+        XCTAssertEqual(size.width, 80)
+        XCTAssertEqual(size.height, 60)
+    }
+
+    func testBoundedScreenshotPNGDataRejectsNonPositiveMaxDimension() throws {
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+
+        XCTAssertNil(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 1_000_000,
+            maxDimension: 0,
+            minScale: 0.05
+        ))
+        XCTAssertNil(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 1_000_000,
+            maxDimension: -1,
+            minScale: 0.05
+        ))
+    }
+
+    func testBoundedScreenshotPNGDataRejectsFractionalMaxDimension() throws {
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+
+        XCTAssertNil(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 1_000_000,
+            maxDimension: 80.6,
+            minScale: 0.05
+        ))
+    }
+
+    func testBoundedScreenshotPNGDataHonorsMaxDimensionOneBoundary() throws {
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+        let data = try XCTUnwrap(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 1_000_000,
+            maxDimension: 1,
+            minScale: 0.05
+        ))
+        let size = try imageSize(in: data)
+
+        XCTAssertEqual(size.width, 1)
+        XCTAssertEqual(size.height, 1)
+    }
+
+    func testBoundedScreenshotByteBudgetRetriesBelowDimensionCapWhenMinScaleAllows() throws {
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+        let data = try XCTUnwrap(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 1,
+            maxDimension: 80,
+            minScale: 0.25
+        ))
+        let size = try imageSize(in: data)
+        let point = screenshotPixelToWindowPoint(
+            CGPoint(x: CGFloat(size.width) / 2, y: CGFloat(size.height) / 2),
+            screenshotPixelSize: CGSize(width: size.width, height: size.height),
+            windowBounds: CGRect(x: 0, y: 0, width: 800, height: 600)
+        )
+
+        XCTAssertLessThan(max(size.width, size.height), 80)
+        XCTAssertGreaterThanOrEqual(max(size.width, size.height), 20)
+        XCTAssertEqual(point.x, 400, accuracy: 0.0001)
+        XCTAssertEqual(point.y, 300, accuracy: 0.0001)
+    }
+
+    func testBoundedScreenshotPNGDataRejectsInvalidMinScale() throws {
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+
+        XCTAssertNil(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 1_000_000,
+            maxDimension: 80,
+            minScale: 1.01
+        ))
+    }
+
+    func testBoundedScreenshotPNGDataRejectsNonFiniteMinScale() throws {
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+
+        XCTAssertNil(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 1_000_000,
+            maxDimension: 80,
+            minScale: .nan
+        ))
+    }
+
+    func testBoundedScreenshotDimensionsMapBackToWindowCoordinatesBelowMinScale() throws {
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+        let data = try XCTUnwrap(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 1_000_000,
+            maxDimension: 80,
+            minScale: 0.25
+        ))
+        let size = try imageSize(in: data)
+        let point = screenshotPixelToWindowPoint(
+            CGPoint(x: CGFloat(size.width) / 2, y: CGFloat(size.height) / 2),
+            screenshotPixelSize: CGSize(width: size.width, height: size.height),
+            windowBounds: CGRect(x: 0, y: 0, width: 800, height: 600)
+        )
+
+        XCTAssertEqual(point.x, 400, accuracy: 0.0001)
+        XCTAssertEqual(point.y, 300, accuracy: 0.0001)
+    }
+
+    func testBoundedScreenshotByteBudgetRetryCoordinatesUseReturnedDimensions() throws {
+        let image = try makeNoisyTestImage(width: 800, height: 600)
+        let data = try XCTUnwrap(boundedScreenshotPNGData(
+            for: image,
+            maxBytes: 50_000,
+            maxDimension: 800,
+            minScale: 0.05
+        ))
+        let size = try imageSize(in: data)
+        let point = screenshotPixelToWindowPoint(
+            CGPoint(x: CGFloat(size.width) / 2, y: CGFloat(size.height) / 2),
+            screenshotPixelSize: CGSize(width: size.width, height: size.height),
+            windowBounds: CGRect(x: 0, y: 0, width: 800, height: 600)
+        )
+
+        XCTAssertLessThanOrEqual(data.count, 50_000)
+        XCTAssertLessThan(max(size.width, size.height), 800)
+        XCTAssertEqual(point.x, 400, accuracy: 0.0001)
+        XCTAssertEqual(point.y, 300, accuracy: 0.0001)
+    }
+
     func testToolDefinitionCount() {
-        XCTAssertEqual(ToolDefinitions.all.count, 9)
+        XCTAssertEqual(ToolDefinitions.all.count, 10)
+    }
+
+    func testAppStateToolResultCanOmitImageAndCapText() {
+        let result = appStateToolResult(
+            renderedText: String(repeating: "x", count: 120),
+            screenshotPNGData: Data([1, 2, 3]),
+            previous: nil,
+            options: AppStateOutputOptions(includeImage: false, maxTextChars: 80)
+        )
+
+        XCTAssertEqual(result.content.count, 1)
+        let text = result.primaryText ?? ""
+        XCTAssertLessThanOrEqual(text.count, 80)
+        XCTAssertTrue(text.contains("[truncated after 80 characters]"))
+    }
+
+    func testAppStateToolResultTreatsZeroTextCapAsUnlimited() {
+        let text = String(repeating: "x", count: 120)
+        let result = appStateToolResult(
+            renderedText: text,
+            screenshotPNGData: nil,
+            previous: nil,
+            options: AppStateOutputOptions(maxTextChars: 0)
+        )
+
+        XCTAssertEqual(result.primaryText, text)
+    }
+
+    func testLimitedAppStateTextDoesNotTruncateAtExactCap() {
+        XCTAssertEqual(limitedAppStateText("abc", maxCharacters: 3), "abc")
+    }
+
+    func testAppStateToolResultDeduplicatesScreenshotUnlessForced() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "old", screenshotPNGData: image, imageIncluded: true)
+        let deduped = appStateToolResult(
+            renderedText: "new",
+            screenshotPNGData: image,
+            previous: previous,
+            options: .defaults
+        )
+        let forced = appStateToolResult(
+            renderedText: "new",
+            screenshotPNGData: image,
+            previous: previous,
+            options: AppStateOutputOptions(forceImage: true)
+        )
+
+        XCTAssertEqual(contentTypes(in: deduped), ["text"])
+        XCTAssertEqual(contentTypes(in: forced), ["text", "image"])
+    }
+
+    func testAppStateToolResultIncludesImageAfterTextOnlyResponse() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "old", screenshotPNGData: image, imageIncluded: false)
+        let result = appStateToolResult(
+            renderedText: "new",
+            screenshotPNGData: image,
+            previous: previous,
+            options: .defaults
+        )
+
+        XCTAssertEqual(contentTypes(in: result), ["text", "image"])
+    }
+
+    func testAppStateToolResultIncludesImageWhenChangePollingSwitchesFromTextOnly() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "same", screenshotPNGData: image, imageIncluded: false)
+        let result = appStateToolResult(
+            renderedText: "same",
+            screenshotPNGData: image,
+            previous: previous,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+
+        XCTAssertEqual(result.primaryText, appStateNoChangeMessage)
+        XCTAssertEqual(contentTypes(in: result), ["text", "image"])
+    }
+
+    func testAppStateToolResultReturnsNoChangeWhenRequested() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "same", screenshotPNGData: image, imageIncluded: true)
+        let result = appStateToolResult(
+            renderedText: "same",
+            screenshotPNGData: image,
+            previous: previous,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+
+        XCTAssertEqual(result.primaryText, appStateNoChangeMessage)
+        XCTAssertEqual(contentTypes(in: result), ["text"])
+    }
+
+    func testAppStateToolResultReturnsDiffWhenAccessibilityChanges() {
+        let image = Data([1, 2, 3])
+        let previous = AppStateOutputCache(renderedText: "old", screenshotPNGData: image, imageIncluded: true)
+        let result = appStateToolResult(
+            renderedText: "new",
+            screenshotPNGData: image,
+            previous: previous,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+
+        XCTAssertTrue(result.primaryText?.contains(appStateDiffHeader) == true)
+        XCTAssertTrue(result.primaryText?.contains("~ old -> new") == true)
+        XCTAssertEqual(contentTypes(in: result), ["text"])
+    }
+
+    func testAppStateToolResultTreatsScreenshotOnlyChangeAsNoAccessibilityChange() {
+        let previous = AppStateOutputCache(renderedText: "same", screenshotPNGData: Data([1, 2, 3]), imageIncluded: true)
+        let output = appStateToolResultWithCache(
+            renderedText: "same",
+            screenshotPNGData: Data([4, 5, 6]),
+            previous: previous,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+
+        XCTAssertEqual(output.result.primaryText, appStateNoChangeMessage)
+        XCTAssertEqual(contentTypes(in: output.result), ["text"])
+
+        let repeated = appStateToolResultWithCache(
+            renderedText: "same",
+            screenshotPNGData: Data([4, 5, 6]),
+            previous: output.cache,
+            options: AppStateOutputOptions(onlyChanges: true)
+        )
+        let fullState = appStateToolResult(
+            renderedText: "same",
+            screenshotPNGData: Data([4, 5, 6]),
+            previous: output.cache,
+            options: .defaults
+        )
+
+        XCTAssertEqual(repeated.result.primaryText, appStateNoChangeMessage)
+        XCTAssertEqual(contentTypes(in: repeated.result), ["text"])
+        XCTAssertEqual(contentTypes(in: fullState), ["text", "image"])
+    }
+
+    func testNonNegativeIntegerArgumentAcceptsJSONNumbers() throws {
+        let arguments = try readOpenComputerUseToolArguments(
+            json: #"{"app":"TextEdit","max_text_chars":20000}"#,
+            file: nil
+        )
+
+        XCTAssertEqual(normalizedNonNegativeIntegerArgument(arguments["max_text_chars"]), 20_000)
+        XCTAssertEqual(normalizedNonNegativeIntegerArgument(0), 0)
+        XCTAssertNil(normalizedNonNegativeIntegerArgument(-1))
+        XCTAssertNil(normalizedNonNegativeIntegerArgument(1.5))
+        XCTAssertNil(normalizedNonNegativeIntegerArgument(true))
+    }
+
+    func testTextSelectionMatchUsesPrefixAndSuffix() throws {
+        let value = "first target middle target end" as NSString
+        let range = try textSelectionMatch(
+            in: value as String,
+            text: "target",
+            prefix: "middle ",
+            suffix: " end"
+        )
+        let cursorRange = try TextSelectionMode(toolValue: "cursor_after").selectedRange(for: range)
+
+        XCTAssertEqual(range.location, value.range(of: "target", options: [], range: NSRange(location: 13, length: value.length - 13)).location)
+        XCTAssertEqual(range.length, ("target" as NSString).length)
+        XCTAssertEqual(cursorRange.location, range.location + range.length)
+        XCTAssertEqual(cursorRange.length, 0)
+    }
+
+    func testTextSelectionMatchRequiresAdjacentPrefixAndSuffix() {
+        XCTAssertThrowsError(try textSelectionMatch(in: "set-xvalue-ok-typed", text: "value-ok", prefix: "set-", suffix: "-typed")) { error in
+            XCTAssertEqual((error as? ComputerUseError)?.errorDescription, "Target text not found in element")
+        }
+        XCTAssertThrowsError(try textSelectionMatch(in: "set-value-ok-x-typed", text: "value-ok", prefix: "set-", suffix: "-typed")) { error in
+            XCTAssertEqual((error as? ComputerUseError)?.errorDescription, "Target text not found in element")
+        }
+    }
+
+    func testTextSelectionMatchRejectsAmbiguousTextWithoutContext() {
+        XCTAssertThrowsError(try textSelectionMatch(in: "target and target", text: "target", prefix: nil, suffix: nil)) { error in
+            XCTAssertEqual((error as? ComputerUseError)?.errorDescription, "Target text is ambiguous; provide prefix or suffix")
+        }
     }
 
     func testReadToolArgumentsAcceptsJSONObject() throws {
@@ -400,6 +801,14 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(AppDiscovery.bestResolutionIndex(of: candidates, matching: "Notes"), 1)
     }
 
+    func testBestResolutionIndexMatchesCaseInsensitively() {
+        let candidates = [
+            AppDiscovery.ResolutionCandidate(name: "Safari", executableName: "Safari", isRegularApp: true),
+        ]
+
+        XCTAssertEqual(AppDiscovery.bestResolutionIndex(of: candidates, matching: "sAfArI"), 0)
+    }
+
     func testBestResolutionIndexFallsBackToAccessoryMatchesWhenNoRegularAppMatches() {
         let candidates = [
             AppDiscovery.ResolutionCandidate(name: "Helper", executableName: "helper", isRegularApp: false),
@@ -410,6 +819,35 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertNil(AppDiscovery.bestResolutionIndex(of: candidates, matching: "missing"))
     }
 
+    func testPreferredPermissionAppBundleURLPrefersInstalledCopyOverTransientRunningCopy() {
+        let installed = URL(fileURLWithPath: "/opt/homebrew/lib/node_modules/open-computer-use/dist/Open Computer Use.app")
+        let running = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/Open Computer Use.app")
+        let fallback = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use-debug/dist/Open Computer Use.app")
+
+        let resolved = PermissionSupport.preferredPermissionAppBundleURL(
+            preferredInstalledBundleURL: installed,
+            runningBundleURL: running,
+            fallbackDevelopmentBundleURL: fallback,
+            preferRunningBundle: false
+        )
+
+        XCTAssertEqual(resolved, installed)
+    }
+
+    func testPreferredPermissionAppBundleURLPrefersRunningDevelopmentCopy() {
+        let installed = URL(fileURLWithPath: "/Applications/Open Computer Use.app")
+        let running = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/Open Computer Use (Dev).app")
+        let fallback = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use-debug/dist/Open Computer Use (Dev).app")
+
+        let resolved = PermissionSupport.preferredPermissionAppBundleURL(
+            preferredInstalledBundleURL: installed,
+            runningBundleURL: running,
+            fallbackDevelopmentBundleURL: fallback,
+            preferRunningBundle: false
+        )
+
+        XCTAssertEqual(resolved, running)
+    }
 
     func testPreferredPermissionAppBundleURLCanPreferRunningReleaseCopyOverStaleInstalledCopy() {
         let staleInstalled = URL(fileURLWithPath: "/Users/example/projects/open-codex-computer-use/dist/npm/open-computer-use/dist/Open Computer Use.app")
@@ -533,6 +971,17 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertNil(response)
     }
 
+    func testActionRequiresCapturedStateThisTurn() {
+        let service = ComputerUseService()
+
+        XCTAssertThrowsError(try service.click(app: "Sample", elementIndex: "1", x: nil, y: nil, clickCount: 1, mouseButton: "left")) { error in
+            XCTAssertEqual(
+                (error as? ComputerUseError)?.errorDescription,
+                "No app state is available for Sample. Run get_app_state before action tools."
+            )
+        }
+    }
+
     func testWindowRelativeFrameUsesSharedGlobalCoordinates() {
         let window = CGRect(x: 1486, y: 556, width: 919, height: 644)
         let child = CGRect(x: 1486, y: 556, width: 919, height: 644)
@@ -570,12 +1019,28 @@ final class OpenComputerUseKitTests: XCTestCase {
         let getAppStateSchema = tools["get_app_state"]?.inputSchema
         let getAppStateProperties = getAppStateSchema?["properties"] as? [String: [String: Any]]
         XCTAssertEqual(getAppStateProperties?["show_full_text"]?["type"] as? String, "boolean")
+        XCTAssertEqual(getAppStateProperties?["include_image"]?["type"] as? String, "boolean")
+        XCTAssertEqual(getAppStateProperties?["force_image"]?["type"] as? String, "boolean")
+        XCTAssertEqual(getAppStateProperties?["only_changes"]?["type"] as? String, "boolean")
+        XCTAssertEqual(getAppStateProperties?["max_text_chars"]?["type"] as? String, "integer")
+        XCTAssertEqual(getAppStateProperties?["max_text_chars"]?["minimum"] as? Int, 0)
         XCTAssertEqual(getAppStateSchema?["required"] as? [String], ["app"])
         let scrollPages = (tools["scroll"]?.inputSchema["properties"] as? [String: [String: Any]])?["pages"]
         XCTAssertEqual(scrollPages?["type"] as? String, "number")
         XCTAssertEqual(
             scrollPages?["description"] as? String,
             "Number of pages to scroll. Fractional values are supported. Defaults to 1"
+        )
+        let selectTextSchema = tools["select_text"]?.inputSchema
+        let selectTextProperties = selectTextSchema?["properties"] as? [String: [String: Any]]
+        XCTAssertEqual(
+            tools["select_text"]?.description,
+            "Select text inside a text element, or place the text cursor before or after it. Provide text exactly as it appears in the accessibility tree, including any Markdown formatting. If the text is not unique, provide surrounding prefix or suffix text to disambiguate it."
+        )
+        XCTAssertEqual(selectTextSchema?["required"] as? [String], ["app", "element_index", "text"])
+        XCTAssertEqual(
+            selectTextProperties?["selection"]?["enum"] as? [String],
+            ["text", "cursor_before", "cursor_after"]
         )
     }
 
@@ -638,6 +1103,70 @@ final class OpenComputerUseKitTests: XCTestCase {
             invalidSecondaryActionErrorMessage(action: "NoSuchAction", elementIndex: 14),
             "NoSuchAction is not a valid secondary action for 14"
         )
+    }
+
+    func testSecondaryActionMatchingAcceptsNamedActionShortName() {
+        let service = ComputerUseService()
+        let closeTabAction = "Name:close tab Target:SafariTab Selector:_close Button Clicked:"
+        let record = ElementRecord(
+            index: 48,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXButtonRole as String,
+            rawActions: [kAXPressAction as String, closeTabAction],
+            prettyActions: [secondaryActionDisplayName(closeTabAction)]
+        )
+
+        XCTAssertEqual(service.matchingAction(requested: "close tab", record: record), closeTabAction)
+    }
+
+    func testSecondaryActionMatchingKeepsRenderedActionsAlignedWithRawActions() {
+        let service = ComputerUseService()
+        let record = ElementRecord(
+            index: 12,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXWindowRole as String,
+            rawActions: [kAXPressAction as String, kAXRaiseAction as String],
+            prettyActions: ["Raise"]
+        )
+
+        XCTAssertEqual(service.matchingAction(requested: "Raise", record: record), kAXRaiseAction as String)
+        XCTAssertEqual(service.matchingAction(requested: "AXRaise", record: record), kAXRaiseAction as String)
+    }
+
+    func testSecondaryActionMatchingAcceptsWindowRaiseDisplayName() {
+        let service = ComputerUseService()
+        let record = ElementRecord(
+            index: 0,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXWindowRole as String,
+            rawActions: [kAXRaiseAction as String],
+            prettyActions: ["Raise"]
+        )
+
+        XCTAssertEqual(service.matchingAction(requested: "Raise", record: record), kAXRaiseAction as String)
+    }
+
+    func testSecondaryActionMatchingRejectsFilteredActionAliases() {
+        let service = ComputerUseService()
+        let visibleShowMenuAction = "Name:show menu Target:SafariButton Selector:_show Menu:"
+        let hiddenInternalAction = ElementRecord(
+            index: 21,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXButtonRole as String,
+            rawActions: [kAXShowMenuAction as String, visibleShowMenuAction],
+            prettyActions: [secondaryActionDisplayName(visibleShowMenuAction)]
+        )
+
+        XCTAssertEqual(service.matchingAction(requested: "show menu", record: hiddenInternalAction), visibleShowMenuAction)
+        XCTAssertNil(service.matchingAction(requested: kAXShowMenuAction as String, record: hiddenInternalAction))
     }
 
     func testSyntheticTextClickUsesLeadingSafePointOnly() {
@@ -854,6 +1383,118 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertFalse(rendered.contains("Pay special attention to the content selected by the user"))
     }
 
+    func testMatchingElementRejectsReusedIdentifierWithMovedFrame() {
+        let service = ComputerUseService()
+        let previousRecord = ElementRecord(
+            index: 1,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 10, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let reusedIdentifierRecord = ElementRecord(
+            index: 9,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 260, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let previous = makeSnapshot(
+            treeLines: ["\t1 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [1: previousRecord]
+        )
+        let refreshed = makeSnapshot(
+            treeLines: ["\t9 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [9: reusedIdentifierRecord]
+        )
+
+        XCTAssertNil(service.matchingElement(
+            previousRecord: previousRecord,
+            previousSnapshot: previous,
+            refreshedSnapshot: refreshed
+        ))
+    }
+
+    func testMatchingElementAllowsIdentifierWithStableLineAndFrame() {
+        let service = ComputerUseService()
+        let previousRecord = ElementRecord(
+            index: 1,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 10, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let refreshedRecord = ElementRecord(
+            index: 9,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 12, y: 22, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let previous = makeSnapshot(
+            treeLines: ["\t1 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [1: previousRecord]
+        )
+        let refreshed = makeSnapshot(
+            treeLines: ["\t9 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [9: refreshedRecord]
+        )
+
+        XCTAssertTrue(service.matchingElement(
+            previousRecord: previousRecord,
+            previousSnapshot: previous,
+            refreshedSnapshot: refreshed
+        ) === refreshedRecord)
+    }
+
+    func testFailedStaleRefetchDoesNotPublishUnmatchedSnapshot() throws {
+        let service = ComputerUseService()
+        let previousRecord = ElementRecord(
+            index: 1,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 10, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let changedRecord = ElementRecord(
+            index: 1,
+            identifier: "compose-send",
+            element: nil,
+            localFrame: CGRect(x: 10, y: 20, width: 80, height: 24),
+            rawActions: [],
+            prettyActions: []
+        )
+        let previous = makeSnapshot(
+            treeLines: ["\t1 button Send ID: compose-send"],
+            focusedSummary: nil,
+            elements: [1: previousRecord]
+        )
+        let refreshed = makeSnapshot(
+            treeLines: ["\t1 button Delete ID: compose-send"],
+            focusedSummary: nil,
+            elements: [1: changedRecord]
+        )
+
+        service.publishSnapshot(previous, for: "Sample Chat")
+
+        XCTAssertThrowsError(try service.publishRefetchedSnapshotIfElementMatches(
+            refreshed,
+            for: "Sample Chat",
+            previousSnapshot: previous,
+            previousRecord: previousRecord
+        ))
+        XCTAssertEqual(service.cachedSnapshot(for: "Sample Chat")?.treeLines, previous.treeLines)
+    }
+
     func testAccessibilityTreeBudgetAllowsDeepElectronWebViews() {
         XCTAssertEqual(accessibilityTreeMaxNodeCount, 1200)
         XCTAssertEqual(accessibilityTreeMaxDepth, 64)
@@ -1030,6 +1671,16 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(meaningfulActions(["AXZoomWindow"], role: kAXButtonRole as String), ["zoom the window"])
     }
 
+    func testAccessibilityRendererUsesNamedActionDescription() {
+        XCTAssertEqual(
+            meaningfulActions(
+                ["Name:close tab Target:SafariTab Selector:_close Button Clicked:"],
+                role: kAXButtonRole as String
+            ),
+            ["close tab"]
+        )
+    }
+
     func testAccessibilityRendererKeepsLinkRoleWhenSuppressingChildren() {
         XCTAssertEqual(
             displayRoleText(
@@ -1175,6 +1826,24 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertTrue(globalPointerFallbacksEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "yes"]))
         XCTAssertFalse(globalPointerFallbacksEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "0"]))
         XCTAssertFalse(globalPointerFallbacksEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "false"]))
+    }
+
+    func testInputFallbackDebugFlagIsIndependentFromPointerFallbackFlag() {
+        XCTAssertTrue(inputFallbackDebugEnabled(environment: ["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS": "1"]))
+        XCTAssertFalse(globalPointerFallbacksEnabled(environment: ["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS": "1"]))
+        XCTAssertFalse(inputFallbackDebugEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS": "1"]))
+    }
+
+    func testGlobalKeyboardInputFlagDefaultsToDisabled() {
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: [:]))
+        XCTAssertTrue(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "1"]))
+        XCTAssertTrue(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": " TRUE "]))
+        XCTAssertTrue(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "yes"]))
+        XCTAssertTrue(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "on"]))
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": ""]))
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "0"]))
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "false"]))
+        XCTAssertFalse(globalKeyboardInputEnabled(environment: ["OPEN_COMPUTER_USE_ALLOW_GLOBAL_KEYBOARD_INPUT": "maybe"]))
     }
 
     func testSetValueAttributeGateMatchesOfficialSettableBoundary() throws {
@@ -1717,7 +2386,16 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertGreaterThan(abs(negativePose.angleOffset), 0.08)
     }
 
-    private func makeSnapshot(treeLines: [String], focusedSummary: String?, selectedText: String? = nil) -> AppSnapshot {
+    private func contentTypes(in result: ToolCallResult) -> [String] {
+        result.content.compactMap { $0.dictionary["type"] as? String }
+    }
+
+    private func makeSnapshot(
+        treeLines: [String],
+        focusedSummary: String?,
+        selectedText: String? = nil,
+        elements: [Int: ElementRecord] = [:]
+    ) -> AppSnapshot {
         AppSnapshot(
             app: RunningAppDescriptor(
                 name: "Sample Chat",
@@ -1731,11 +2409,12 @@ final class OpenComputerUseKitTests: XCTestCase {
             targetWindowLayer: nil,
             screenshotPNGData: nil,
             mode: .accessibility,
+            showFullText: false,
             treeLines: treeLines,
             focusedSummary: focusedSummary,
             focusedElement: nil,
             selectedText: selectedText,
-            elements: [:]
+            elements: elements
         )
     }
 
