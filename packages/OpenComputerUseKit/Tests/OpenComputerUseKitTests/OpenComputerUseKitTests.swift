@@ -1138,6 +1138,59 @@ final class OpenComputerUseKitTests: XCTestCase {
         ))
     }
 
+    func testAccessibilityRendererUsesSafariCustomActionDescriptionName() {
+        XCTAssertEqual(
+            meaningfulActions(
+                ["Name:close tab Target:SafariTab Selector:_close Button Clicked:"],
+                role: kAXButtonRole as String
+            ),
+            ["close tab"]
+        )
+        XCTAssertNil(accessibilityActionDescriptionName("Namespace:close tab Target:SafariTab"))
+    }
+
+    func testSecondaryActionMatchingKeepsFilteredRawActionsAligned() {
+        let service = ComputerUseService()
+        let closeTab = "Name:close tab Target:SafariTab Selector:_close Button Clicked:"
+        let record = ElementRecord(
+            index: 48,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXButtonRole as String,
+            rawActions: [kAXPressAction as String, closeTab],
+            prettyActions: ["close tab"]
+        )
+
+        XCTAssertEqual(service.matchingAction(requested: "close-tab", record: record), closeTab)
+        XCTAssertEqual(service.matchingAction(requested: kAXPressAction as String, record: record), kAXPressAction as String)
+        XCTAssertNil(service.matchingAction(requested: "Press", record: record))
+    }
+
+    func testSecondaryActionMatchingRejectsAmbiguousDisplayNames() {
+        let service = ComputerUseService()
+        let record = ElementRecord(
+            index: 49,
+            identifier: nil,
+            element: nil,
+            localFrame: nil,
+            role: kAXButtonRole as String,
+            rawActions: [
+                "Name:close tab Target:FirstTab Selector:_close:",
+                "Name:close tab Target:SecondTab Selector:_close:",
+            ],
+            prettyActions: ["close tab", "close tab"]
+        )
+
+        XCTAssertNil(service.matchingAction(requested: "close tab", record: record))
+        XCTAssertEqual(service.matchingAction(requested: record.rawActions[1], record: record), record.rawActions[1])
+        let emitted = meaningfulActions(record.rawActions, role: kAXButtonRole as String)
+        XCTAssertEqual(emitted, record.rawActions)
+        for (selector, rawAction) in zip(emitted, record.rawActions) {
+            XCTAssertEqual(service.matchingAction(requested: selector, record: record), rawAction)
+        }
+    }
+
     func testAccessibilityRendererMarksCompactGenericClickTargetsAsButtons() {
         XCTAssertTrue(shouldRenderCompactGenericActionTarget(
             role: kAXGroupRole as String,

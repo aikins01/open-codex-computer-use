@@ -832,16 +832,15 @@ public final class ComputerUseService {
         return record
     }
 
-    private func matchingAction(requested: String, record: ElementRecord) -> String? {
+    func matchingAction(requested: String, record: ElementRecord) -> String? {
         if let exact = record.rawActions.first(where: { $0.caseInsensitiveCompare(requested) == .orderedSame }) {
             return exact
         }
-
-        if let pretty = zip(record.rawActions, record.prettyActions).first(where: { $0.1.caseInsensitiveCompare(requested) == .orderedSame }) {
-            return pretty.0
+        let visibleActions = record.role.map { meaningfulRawActions(record.rawActions, role: $0) } ?? record.rawActions
+        let matches = visibleActions.filter { rawAction in
+            secondaryActionNamesEquivalent(requested, secondaryActionDisplayName(rawAction))
         }
-
-        return nil
+        return matches.count == 1 ? matches[0] : nil
     }
 
     private func invalidSecondaryActionMessage(action: String, record: ElementRecord) -> String {
