@@ -45,6 +45,10 @@ public enum ToolDefinitions {
                         description: "Mouse button to click. Defaults to left.",
                         enumValues: ["left", "right", "middle"]
                     ),
+                    "click_method": stringProperty(
+                        description: "Click implementation: auto (default), accessibility, app_post, sky_click, or global. Accessibility requires element_index. app_post sends a public event directly to the target app. sky_click uses the macOS SkyLight background window path. Global may move the system pointer and requires OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1.",
+                        enumValues: ClickMethod.allCases.map(\.rawValue)
+                    ),
                 ],
                 required: ["app"]
             )

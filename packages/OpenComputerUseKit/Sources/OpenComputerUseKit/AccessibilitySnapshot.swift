@@ -38,6 +38,11 @@ enum SnapshotMode {
     case fixture
 }
 
+enum SnapshotRecoveryPolicy: Equatable {
+    case allowActivation
+    case readOnly
+}
+
 public struct AccessibilityTreeLimits: Equatable, Sendable {
     public static let defaultMaxNodeCount = 1200
     public static let defaultMaxDepth = 64
@@ -88,8 +93,8 @@ private let windowVisibilityRecoveryDelay: TimeInterval = 0.7
 private let axWebAreaRole = "AXWebArea"
 private let axContentsAttribute = "AXContents"
 private let axVisibleChildrenAttribute = "AXVisibleChildren"
-private let anonymousActionTargetMaxWidth: CGFloat = 240
-private let anonymousActionTargetMaxHeight: CGFloat = 120
+private let compactGenericActionTargetMaxWidth: CGFloat = 240
+private let compactGenericActionTargetMaxHeight: CGFloat = 120
 
 struct ImageCaptureConfig: Sendable, Equatable {
     let captureTimeout: TimeInterval
@@ -222,7 +227,8 @@ enum SnapshotBuilder {
     static func build(
         for app: RunningAppDescriptor,
         textLimit: SnapshotTextLimit = .defaults,
-        treeLimits: AccessibilityTreeLimits = .defaults
+        treeLimits: AccessibilityTreeLimits = .defaults,
+        recoveryPolicy: SnapshotRecoveryPolicy = .allowActivation
     ) throws -> AppSnapshot {
         if app.name == FixtureBridge.appName, let fixtureState = try FixtureBridge.readState() {
             return buildFixtureSnapshot(app: app, state: fixtureState)
@@ -238,7 +244,9 @@ enum SnapshotBuilder {
         let systemWide = AXUIElementCreateSystemWide()
         var focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
         var focusedWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
-        if focusedWindow == nil, recoverVisibleWindow(for: app, appElement: appElement, preferredWindow: nil) {
+        if focusedWindow == nil,
+           recoveryPolicy == .allowActivation,
+           recoverVisibleWindow(for: app, appElement: appElement, preferredWindow: nil) {
             focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
             focusedWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide)
         }
@@ -251,7 +259,9 @@ enum SnapshotBuilder {
 
         var windowTitle = stringValue(of: rootWindow, attribute: kAXTitleAttribute)
         var windowCapture = WindowCapture.resolve(for: app.pid, titleHint: windowTitle)
-        if windowCapture == nil, recoverVisibleWindow(for: app, appElement: appElement, preferredWindow: rootWindow) {
+        if windowCapture == nil,
+           recoveryPolicy == .allowActivation,
+           recoverVisibleWindow(for: app, appElement: appElement, preferredWindow: rootWindow) {
             focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
             if let recoveredWindow = preferredFocusedWindow(appElement: appElement, appPID: app.pid, focusedApplication: focusedApplication, systemWide: systemWide) {
                 rootWindow = recoveredWindow
@@ -787,23 +797,44 @@ private struct TreeRenderer {
         let axIdentifier = displayIdentifier(stringValue(of: root, attribute: kAXIdentifierAttribute))
         let traits = summarizeTraits(of: root)
         let actions = copyActions(root) ?? []
+        let exposesPrimaryClickAction = hasPrimaryClickAction(actions)
         let prettyActions = meaningfulActions(actions, role: role)
         let placeholder = placeholderValue(of: root, textLimit: context.textLimit)
         let webAreaDepth = webAreaDepth(role: role, ancestors: ancestors)
         let localFrame = resolveLocalFrame(of: root, windowBounds: context.windowBounds)
         let rowTexts = role == kAXRowRole as String ? flattenedRowTexts(of: root, textLimit: context.textLimit) : []
         let childElements = children(of: root)
-        let genericTextSummary = summarizedGenericText(
-            of: root,
+        let hasActionableLinkDescendant =
+            (role == kAXGroupRole as String || role == kAXUnknownRole as String)
+            && exposesPrimaryClickAction
+            && containsActionableLinkDescendant(
+                in: childElements,
+                textLimit: context.textLimit
+            )
+        let rendersCompactGenericActionTarget = shouldRenderCompactGenericActionTarget(
             role: role,
-            childElements: childElements,
-            textLimit: context.textLimit
+            hasPrimaryClickAction: exposesPrimaryClickAction,
+            localFrame: localFrame,
+            hasActionableLinkDescendant: hasActionableLinkDescendant
         )
+        let genericTextSummary: String?
+        if hasActionableLinkDescendant {
+            genericTextSummary = nil
+        } else {
+            genericTextSummary = summarizedGenericText(
+                of: root,
+                role: role,
+                childElements: childElements,
+                textLimit: context.textLimit,
+                minimumTextCount: rendersCompactGenericActionTarget ? 1 : 2
+            )
+        }
         let summaryImageChildren = genericTextSummary == nil ? [] : summaryImageDescendants(of: root)
-        let rendersSummaryAsChildren = shouldRenderGenericTextSummaryAsChildren(
-            genericTextSummary,
-            summaryImageCount: summaryImageChildren.count
-        )
+        let rendersSummaryAsChildren = !rendersCompactGenericActionTarget
+            && shouldRenderGenericTextSummaryAsChildren(
+                genericTextSummary,
+                summaryImageCount: summaryImageChildren.count
+            )
         let title = preferredDisplayTitle(
             for: root,
             role: role,
@@ -816,17 +847,6 @@ private struct TreeRenderer {
         let linkText = role == "AXLink" ? markdownLinkText(for: root, title: title, label: label, value: value, textLimit: context.textLimit) : nil
         let displayTitle = linkText ?? title
         let inlineRowSummary = outlineRowSummary(for: root, role: role)
-        let exposesPrimaryClickAction = hasPrimaryClickAction(actions)
-        let rendersAnonymousActionTarget = shouldRenderAnonymousActionTarget(
-            role: role,
-            title: displayTitle,
-            label: label,
-            help: help,
-            value: value,
-            genericTextSummary: genericTextSummary,
-            hasPrimaryClickAction: exposesPrimaryClickAction,
-            localFrame: localFrame
-        )
         let hidesChildren = shouldSuppressChildren(
             role: role,
             title: displayTitle,
@@ -858,7 +878,7 @@ private struct TreeRenderer {
             childCount: childElements.count,
             genericTextSummary: genericTextSummary,
             webAreaDepth: webAreaDepth,
-            preservesAnonymousActionTarget: rendersAnonymousActionTarget
+            preservesCompactGenericActionTarget: rendersCompactGenericActionTarget
         ) {
             for child in childElements {
                 render(child, depth: depth, ancestors: nextAncestors)
@@ -896,7 +916,7 @@ private struct TreeRenderer {
             value: value,
             precedingSegments: [labelSegment, helpSegment, urlSegment, identifierSegment, valueSegment]
         )
-        let frameSegment = rendersAnonymousActionTarget
+        let frameSegment = rendersCompactGenericActionTarget
             ? localFrame.map { " Frame: \($0.renderedLocalFrame)" } ?? ""
             : ""
         let actionsPrefix = shouldCommaSeparateActions(
@@ -906,7 +926,7 @@ private struct TreeRenderer {
             segments: [labelSegment, helpSegment, urlSegment, identifierSegment, valueSegment, placeholderSegment]
         ) ? ", Secondary Actions: " : " Secondary Actions: "
         let actionsSegment = prettyActions.isEmpty ? "" : "\(actionsPrefix)\(prettyActions.joined(separator: ", "))"
-        let renderedRoleText = rendersAnonymousActionTarget ? "button" : roleText
+        let renderedRoleText = rendersCompactGenericActionTarget ? "button" : roleText
         let linePrefix = renderedRoleText.isEmpty ? "\(index)" : "\(index) \(renderedRoleText)"
 
         let lineBody = "\(linePrefix)\(traitsSegment)\(titleSegment)\(rowSummarySegment)\(labelSegment)\(helpSegment)\(urlSegment)\(identifierSegment)\(valueSegment)\(placeholderSegment)\(frameSegment)"
@@ -1027,6 +1047,42 @@ private struct TreeRenderer {
         }
 
         return children
+    }
+
+    private func containsActionableLinkDescendant(
+        in elements: [AXUIElement],
+        textLimit: SnapshotTextLimit,
+        ancestors: [AXUIElement] = [],
+        depth: Int = 0
+    ) -> Bool {
+        guard depth < 8 else {
+            return false
+        }
+
+        for element in elements {
+            guard !ancestors.contains(where: { CFEqual($0, element) }) else {
+                continue
+            }
+
+            let role = stringValue(of: element, attribute: kAXRoleAttribute) ?? ""
+            if role == "AXLink",
+               let url = urlValue(of: element, attribute: kAXURLAttribute, textLimit: textLimit),
+               !url.isEmpty
+            {
+                return true
+            }
+
+            if containsActionableLinkDescendant(
+                in: children(of: element),
+                textLimit: textLimit,
+                ancestors: ancestors + [element],
+                depth: depth + 1
+            ) {
+                return true
+            }
+        }
+
+        return false
     }
 }
 
@@ -1533,14 +1589,14 @@ func shouldElideNode(
     childCount: Int,
     genericTextSummary: String? = nil,
     webAreaDepth: Int? = nil,
-    preservesAnonymousActionTarget: Bool = false
+    preservesCompactGenericActionTarget: Bool = false
 ) -> Bool {
     let genericRoles = [kAXGroupRole as String, kAXUnknownRole as String]
     guard genericRoles.contains(role) else {
         return false
     }
 
-    if preservesAnonymousActionTarget {
+    if preservesCompactGenericActionTarget {
         return false
     }
 
@@ -1595,17 +1651,19 @@ func hasPrimaryClickAction(_ actions: [String]) -> Bool {
     }
 }
 
-func shouldRenderAnonymousActionTarget(
+func shouldRenderCompactGenericActionTarget(
     role: String,
-    title: String?,
-    label: String?,
-    help: String?,
-    value: String?,
-    genericTextSummary: String?,
     hasPrimaryClickAction: Bool,
-    localFrame: CGRect?
+    localFrame: CGRect?,
+    hasActionableLinkDescendant: Bool = false
 ) -> Bool {
     guard hasPrimaryClickAction else {
+        return false
+    }
+
+    // A URL-bearing AXLink is the navigation target. Do not hide it behind a
+    // generic action wrapper that happens to expose AXPress as well.
+    guard !hasActionableLinkDescendant else {
         return false
     }
 
@@ -1616,17 +1674,13 @@ func shouldRenderAnonymousActionTarget(
     guard let localFrame,
           localFrame.width > 0,
           localFrame.height > 0,
-          localFrame.width <= anonymousActionTargetMaxWidth,
-          localFrame.height <= anonymousActionTargetMaxHeight
+          localFrame.width <= compactGenericActionTargetMaxWidth,
+          localFrame.height <= compactGenericActionTargetMaxHeight
     else {
         return false
     }
 
-    return title == nil
-        && label == nil
-        && help == nil
-        && value == nil
-        && genericTextSummary == nil
+    return true
 }
 
 private func shouldSuppressChildren(
@@ -1656,7 +1710,8 @@ private func summarizedGenericText(
     of element: AXUIElement,
     role: String,
     childElements: [AXUIElement],
-    textLimit: SnapshotTextLimit = .defaults
+    textLimit: SnapshotTextLimit = .defaults,
+    minimumTextCount: Int = 2
 ) -> String? {
     guard role == kAXGroupRole as String || role == kAXUnknownRole as String else {
         return nil
@@ -1671,7 +1726,7 @@ private func summarizedGenericText(
     }
 
     let texts = descendantTextsForSummary(of: element, textLimit: textLimit)
-    guard texts.count >= 2 else {
+    guard texts.count >= minimumTextCount else {
         return nil
     }
 
@@ -1756,6 +1811,14 @@ private func isPlainGenericTextContainer(_ element: AXUIElement, children: [AXUI
         }
 
         if childRole == kAXGroupRole as String || childRole == kAXUnknownRole as String {
+            // Crossing this boundary would collapse the actionable child into its parent's text summary.
+            if isGenericPrimaryActionSummaryBoundary(
+                role: childRole,
+                actions: copyActions(child) ?? []
+            ) {
+                return false
+            }
+
             guard depth < 3 else {
                 return false
             }
@@ -1769,6 +1832,11 @@ private func isPlainGenericTextContainer(_ element: AXUIElement, children: [AXUI
     }
 
     return true
+}
+
+func isGenericPrimaryActionSummaryBoundary(role: String, actions: [String]) -> Bool {
+    let genericRoles = [kAXGroupRole as String, kAXUnknownRole as String]
+    return genericRoles.contains(role) && hasPrimaryClickAction(actions)
 }
 
 func displayRoleText(

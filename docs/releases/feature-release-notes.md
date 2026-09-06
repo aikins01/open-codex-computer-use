@@ -1,9 +1,25 @@
 # 功能发布记录
 
+## 2026-09
+
+| 日期 | 功能域 | 用户价值 | 变更摘要 |
+| --- | --- | --- | --- |
+| 2026-09-01 | 内嵌 App Agent Socket 隔离 | 使用内嵌 OCU 的宿主不会再与用户全局 OCU 争用同一个 App Agent Socket，避免一个实例意外终止或替换另一个实例。 | 发布 `0.3.3`，为显式配置 namespace 的宿主生成确定性、短且不泄露原值的 Socket 文件名；未配置时继续兼容旧路径。 |
+
+## 2026-08
+
+| 日期 | 功能域 | 用户价值 | 变更摘要 |
+| --- | --- | --- | --- |
+| 2026-08-29 | 跨平台文本与 Web 链接动作 | Linux 用户在 Ubuntu 24.04 等环境中可稳定使用文本操作；Chrome / BOSS 中的导航链接也能保持独立定位与点击。 | 发布 `0.3.2`，通过标准 AT-SPI 接口检测文本能力，并保留带 URL 的 Web 链接动作节点，避免父级通用动作吞掉链接语义。 |
+| 2026-08-08 | Linux AT-SPI 文本能力检测 | Ubuntu 24.04 等 PyGObject 环境中的 `get_app_state`、`type_text` 和 `set_value` 不再因缺少非标准 `Accessible.is_text` / `is_editable_text` 属性而崩溃。 | Linux bridge 改为通过标准 `Accessible.get_interfaces()` 检测 `Text` / `EditableText`，并新增不依赖真实桌面的 Python 回归测试。 |
+
 ## 2026-07
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-07-30 | Web 可点击选项边界 | Chrome 等 Web 页面中的多个文本选项即使位于同一个摘要容器内，也能分别保留可操作的 `element_index`；BOSS 直聘转发弹窗中的“站内同事”“转发至其他”和“邮件转发”可以被独立定位。 | 发布 `0.3.1`，让带 `AXPress`、`AXConfirm` 或 `AXOpen` 的紧凑通用节点成为文本摘要边界并渲染为 `button`；普通纯文本压缩以及零尺寸、大面积通用节点过滤保持不变。 |
+| 2026-07-27 | 可配置与后台点击 | 调用方可以显式选择点击实现，并在 macOS 上对被遮挡的同 Space 窗口执行后台点击，同时保持真实鼠标、前台应用、窗口焦点和层级不变。 | 发布 `0.3.0`，为 `click` 新增 `click_method`，提供 `auto`、`accessibility`、`app_post`、`global` 和 macOS-only `sky_click`；默认 `auto` 行为保持不变，显式模式失败时不静默切换实现，`global` 继续要求环境授权。 |
+| 2026-07-20 | 匿名 Web 图标控件 | Chrome 等 Web 页面里的纯图标按钮即使没有可读名称，也能在 snapshot 中保留可点击的 `element_index`，Agent 可以更稳定地操作 icon-only 控件。 | 发布 `0.2.1`，保留具有 `AXPress` / `AXConfirm` / `AXOpen` 主动作且 frame 紧凑有效的匿名 `AXGroup` / `AXUnknown`，渲染为 `button`；同时继续过滤零尺寸节点和大面积通用点击容器。 |
 | 2026-07-08 | 快照预算与长文本控制 | 长网页、长列表和复杂表格可以显式提高 accessibility tree 预算，读取长消息或文档时也能按需选择更大的文本上限或全文模式。 | 发布 `0.2.0`，三端默认 tree budget 统一为 1200/64，并为 `get_app_state` / `snapshot` 增加 `max_tree_nodes`、`max_tree_depth` 与 `text_limit` / `--text-limit`；`show_full_text` / `--show-full-text` 已由 `text_limit: "max"` / `--text-limit max` 替代。 |
 | 2026-07-02 | macOS 截图上下文控制 | MCP host 可以按自己的上下文预算调小 `get_app_state` 和 action tool 返回的截图，降低复杂窗口反复返回大 PNG 对 agent 上下文的压力。 | macOS 截图捕获新增 `OPEN_COMPUTER_USE_IMAGE_CAPTURE_TIMEOUT`、`OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION`、`OPEN_COMPUTER_USE_IMAGE_MAX_BYTES`、`OPEN_COMPUTER_USE_IMAGE_MIN_SCALE` 配置；默认行为保持不变，并确保较小的 `OPEN_COMPUTER_USE_IMAGE_MAX_DIMENSION` 仍作为返回 PNG 的长边上限生效。 |
 

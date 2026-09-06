@@ -69,7 +69,7 @@ enum InputSimulation {
 
     static func clickTargeted(at point: CGPoint, button: MouseButtonKind, clickCount: Int, pid: pid_t) throws {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
-            throw ComputerUseError.message("Failed to create targeted event source.")
+            throw ComputerUseError.message("Failed to create app-post event source.")
         }
 
         for _ in 0..<max(clickCount, 1) {
@@ -77,6 +77,26 @@ enum InputSimulation {
             try postMouseEventToPid(type: button.downEvent, source: source, point: point, button: button.cgButton, clickState: clickCount, pid: pid)
             try postMouseEventToPid(type: button.upEvent, source: source, point: point, button: button.cgButton, clickState: clickCount, pid: pid)
         }
+    }
+
+    static func clickWithSkyLight(
+        at screenPoint: CGPoint,
+        windowPoint: CGPoint,
+        windowBounds: CGRect,
+        windowID: CGWindowID,
+        clickCount: Int,
+        pid: pid_t
+    ) throws {
+        try SkyClickDispatcher.click(
+            target: SkyClickTarget(
+                screenPoint: screenPoint,
+                windowPoint: windowPoint,
+                windowBounds: windowBounds,
+                windowID: windowID,
+                pid: pid
+            ),
+            clickCount: clickCount
+        )
     }
 
     static func scrollTargeted(at point: CGPoint, direction: String, pages: Double, pid: pid_t) throws {
