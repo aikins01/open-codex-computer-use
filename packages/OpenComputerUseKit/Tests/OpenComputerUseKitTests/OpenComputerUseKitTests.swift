@@ -1167,6 +1167,37 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertNil(service.matchingAction(requested: "Press", record: record))
     }
 
+    func testSecondaryActionSelectorsDoNotShadowRawActionNames() {
+        let service = ComputerUseService()
+        // Include both a filtered action and a visible action, and exercise the
+        // case-insensitive exact lookup used by the executor.
+        for nativeAction in ["AXPress", "AXRaise"] {
+            for customName in [nativeAction, nativeAction.lowercased()] {
+                let customAction = "Name:\(customName) Target:CustomTarget Selector:_custom:"
+                for rawActions in [[nativeAction, customAction], [customAction, nativeAction]] {
+                    let emitted = meaningfulActions(rawActions, role: kAXButtonRole as String)
+                    let visible = meaningfulRawActions(rawActions, role: kAXButtonRole as String)
+                    let record = ElementRecord(
+                        index: 50,
+                        identifier: nil,
+                        element: nil,
+                        localFrame: nil,
+                        role: kAXButtonRole as String,
+                        rawActions: rawActions,
+                        prettyActions: emitted
+                    )
+
+                    XCTAssertTrue(emitted.contains(customAction))
+                    XCTAssertEqual(emitted.count, visible.count)
+                    for (selector, expected) in zip(emitted, visible) {
+                        XCTAssertEqual(service.matchingAction(requested: selector, record: record), expected)
+                    }
+                    XCTAssertEqual(service.matchingAction(requested: nativeAction, record: record), nativeAction)
+                }
+            }
+        }
+    }
+
     func testSecondaryActionMatchingRejectsAmbiguousDisplayNames() {
         let service = ComputerUseService()
         let record = ElementRecord(

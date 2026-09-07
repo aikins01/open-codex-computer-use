@@ -4,8 +4,8 @@
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-09-06 | macOS secondary action | Agent 可以通过 Safari 暴露的 `close tab` secondary action 可靠关闭标签页，不会因内部动作被过滤而误执行另一项动作。 | macOS renderer 将 `Name:close tab ...` 形式的 AppKit custom action descriptor 显示为短名称，executor 从同一组过滤后的 raw actions 做等价名称匹配，并拒绝歧义匹配；短名称与其他原始 action 冲突时保留完整 descriptor，避免误执行同名原始动作。 |
 | 2026-09-06 | macOS 应用名称解析 | 按名称定位 Safari 等应用时优先匹配真实应用，避免同名后台 helper 抢占匹配结果。 | 按普通应用名称、普通应用 executable、后台应用名称、后台 executable 分级匹配；同级保持原顺序，bundle identifier 和安全过滤规则不变。 |
-| 2026-09-06 | macOS secondary action | Agent 可以通过 Safari 暴露的 `close tab` secondary action 可靠关闭标签页，不会因内部动作被过滤而误执行另一项动作。 | macOS renderer 将 `Name:close tab ...` 形式的 AppKit custom action descriptor 显示为短名称，executor 从同一组过滤后的 raw actions 做等价名称匹配，并拒绝歧义匹配。 |
 | 2026-09-01 | 内嵌 App Agent Socket 隔离 | 使用内嵌 OCU 的宿主不会再与用户全局 OCU 争用同一个 App Agent Socket，避免一个实例意外终止或替换另一个实例。 | 发布 `0.3.3`，为显式配置 namespace 的宿主生成确定性、短且不泄露原值的 Socket 文件名；未配置时继续兼容旧路径。 |
 
 ## 2026-08

@@ -1819,7 +1819,13 @@ func meaningfulActions(_ values: [String], role: String) -> [String] {
         let collides = names.indices.contains { other in
             other != index && secondaryActionNamesEquivalent(names[index], names[other])
         }
-        return collides ? rawActions[index] : names[index]
+        // Exact raw-action lookup takes precedence over display-name lookup,
+        // including actions omitted from the rendered list.
+        let shadowsRawAction = values.contains { rawAction in
+            rawAction != rawActions[index]
+                && rawAction.caseInsensitiveCompare(names[index]) == .orderedSame
+        }
+        return collides || shadowsRawAction ? rawActions[index] : names[index]
     }
 }
 
